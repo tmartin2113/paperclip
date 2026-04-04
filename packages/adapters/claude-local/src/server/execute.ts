@@ -26,6 +26,7 @@ import {
   isClaudeMaxTurnsResult,
   isClaudeUnknownSessionError,
 } from "./parse.js";
+import { buildPlanningPrompt, buildExecutionPrompt } from "./two-phase-prompts.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const PAPERCLIP_SKILLS_CANDIDATES = [
@@ -535,8 +536,115 @@ async function injectSharedMemories(
 // never make local inference calls (vLLM, etc.) — that responsibility
 // belongs to the Vibe-Stack inference layer.
 
+function mergeAdapterResults(
+  phase1: AdapterExecutionResult,
+  phase2: AdapterExecutionResult,
+): AdapterExecutionResult {
+  return {
+    ...phase2,
+    usage: {
+      inputTokens: (phase1.usage?.inputTokens ?? 0) + (phase2.usage?.inputTokens ?? 0),
+      outputTokens: (phase1.usage?.outputTokens ?? 0) + (phase2.usage?.outputTokens ?? 0),
+      cachedInputTokens: (phase1.usage?.cachedInputTokens ?? 0) + (phase2.usage?.cachedInputTokens ?? 0),
+    },
+    costUsd: (phase1.costUsd ?? 0) + (phase2.costUsd ?? 0),
+    sessionId: phase2.sessionId,
+    sessionParams: phase2.sessionParams,
+    resultJson: {
+      ...(phase2.resultJson ?? {}),
+      phase1_summary: phase1.summary ?? null,
+      phase1_input_tokens: phase1.usage?.inputTokens ?? 0,
+      phase1_output_tokens: phase1.usage?.outputTokens ?? 0,
+    },
+  };
+}
+
+function extractPlanFromResult(result: AdapterExecutionResult): string {
+  const resultText = result.summary || asString(result.resultJson?.result, "");
+  if (resultText.length > 50) return resultText;
+  return "No structured plan was produced. Proceed with the full task.";
+}
+
+async function executeTwoPhase(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
+  const { config } = ctx;
+
+  const maxPlanningTurns = asNumber(config.maxPlanningTurns, 10);
+  const totalMaxTurns = asNumber(config.maxTurnsPerRun, 60);
+  const maxExecutionTurns = Math.max(10, totalMaxTurns - maxPlanningTurns);
+  const planningModel = asString(config.planningModel, "").trim();
+
+  const safeLog = async (msg: string) => {
+    if (ctx.onLog) await ctx.onLog("stderr", `[paperclip:two-phase] ${msg}\n`);
+  };
+
+  await safeLog(`Phase 1: Planning (max ${maxPlanningTurns} turns, model: ${planningModel || config.model || "default"})`);
+
+  // Phase 1: Plan & Delegate
+  const phase1Prompt = buildPlanningPrompt(ctx, maxPlanningTurns);
+  const phase1Ctx: AdapterExecutionContext = {
+    ...ctx,
+    config: {
+      ...config,
+      maxTurnsPerRun: maxPlanningTurns,
+      ...(planningModel ? { model: planningModel } : {}),
+      promptTemplate: phase1Prompt,
+      twoPhaseEnabled: false,  // prevent recursion
+    },
+  };
+
+  let phase1Result: AdapterExecutionResult;
+  try {
+    phase1Result = await execute(phase1Ctx);
+  } catch (err) {
+    await safeLog(`Phase 1 failed: ${err}`);
+    throw err;
+  }
+
+  // If Phase 1 had a fatal error (not max_turns), report it
+  if (phase1Result.exitCode !== 0 && phase1Result.exitCode !== null && !isClaudeMaxTurnsResult(phase1Result.resultJson)) {
+    await safeLog(`Phase 1 exited with error (code ${phase1Result.exitCode}), skipping Phase 2`);
+    return phase1Result;
+  }
+
+  const plan = extractPlanFromResult(phase1Result);
+  await safeLog(`Phase 1 complete. Plan length: ${plan.length} chars`);
+  await safeLog(`Phase 2: Execution (max ${maxExecutionTurns} turns)`);
+
+  // Phase 2: Execute
+  const phase2Prompt = buildExecutionPrompt(ctx, maxExecutionTurns, plan, "See plan above for delegation details.");
+  const phase2Ctx: AdapterExecutionContext = {
+    ...ctx,
+    config: {
+      ...config,
+      maxTurnsPerRun: maxExecutionTurns,
+      promptTemplate: phase2Prompt,
+      twoPhaseEnabled: false,  // prevent recursion
+    },
+  };
+
+  let phase2Result: AdapterExecutionResult;
+  try {
+    phase2Result = await execute(phase2Ctx);
+  } catch (err) {
+    await safeLog(`Phase 2 failed: ${err}`);
+    return {
+      ...phase1Result,
+      errorMessage: `Phase 2 failed: ${err}`,
+      errorCode: "phase2_failed",
+    };
+  }
+
+  await safeLog("Phase 2 complete. Merging results.");
+  return mergeAdapterResults(phase1Result, phase2Result);
+}
+
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
   const { runId, agent, runtime, config, context, onLog, onMeta, authToken } = ctx;
+
+  // Two-phase execution: plan & delegate first, then implement
+  if (asBoolean(config.twoPhaseEnabled, false)) {
+    return executeTwoPhase(ctx);
+  }
 
   const promptTemplate = asString(
     config.promptTemplate,
