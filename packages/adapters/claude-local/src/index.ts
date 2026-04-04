@@ -25,6 +25,9 @@ Core fields:
 - command (string, optional): defaults to "claude"
 - extraArgs (string[], optional): additional CLI args
 - env (object, optional): KEY=VALUE environment variables
+- twoPhaseEnabled (boolean, optional): enable plan-then-execute two-phase mode (default: false)
+- maxPlanningTurns (number, optional): max turns for Phase 1 planning (default: 10, only used when twoPhaseEnabled)
+- planningModel (string, optional): override model for Phase 1 (e.g. claude-haiku-4-5-20251001 for cheaper planning)
 
 Operational fields:
 - timeoutSec (number, optional): run timeout in seconds
