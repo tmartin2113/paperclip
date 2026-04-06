@@ -2623,6 +2623,44 @@ export function heartbeatService(db: Db) {
       };
     },
 
+    resetRuntimeStateTokens: async (agentId: string, clear = false) => {
+      await db.transaction(async (tx) => {
+        if (clear) {
+          await tx
+            .update(agentRuntimeState)
+            .set({
+              tokensResetAt: null,
+              totalInputTokensBaseline: 0,
+              totalOutputTokensBaseline: 0,
+              totalCachedInputTokensBaseline: 0,
+              totalCostCentsBaseline: 0,
+            })
+            .where(eq(agentRuntimeState.agentId, agentId));
+          return;
+        }
+        const [current] = await tx
+          .select({
+            totalInputTokens: agentRuntimeState.totalInputTokens,
+            totalOutputTokens: agentRuntimeState.totalOutputTokens,
+            totalCachedInputTokens: agentRuntimeState.totalCachedInputTokens,
+            totalCostCents: agentRuntimeState.totalCostCents,
+          })
+          .from(agentRuntimeState)
+          .where(eq(agentRuntimeState.agentId, agentId));
+        if (!current) return; // no runtime state row yet — nothing to snapshot
+        await tx
+          .update(agentRuntimeState)
+          .set({
+            tokensResetAt: new Date(),
+            totalInputTokensBaseline: current.totalInputTokens,
+            totalOutputTokensBaseline: current.totalOutputTokens,
+            totalCachedInputTokensBaseline: current.totalCachedInputTokens,
+            totalCostCentsBaseline: current.totalCostCents,
+          })
+          .where(eq(agentRuntimeState.agentId, agentId));
+      });
+    },
+
     listTaskSessions: async (agentId: string) => {
       const agent = await getAgent(agentId);
       if (!agent) throw notFound("Agent not found");
