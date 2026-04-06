@@ -134,6 +134,10 @@ const agentRowFixture = {
 
 describe("heartbeatService runtime-state with token baselines", () => {
   it("getRuntimeState returns baseline columns and tokensResetAt as null when never reset", async () => {
+    // NOTE: the mock is column-blind — it returns whatever is in the fixture regardless
+    // of which columns the query selects. This test pins the TypeScript-level return shape
+    // of getRuntimeState; it cannot detect a DB-layer regression where the underlying
+    // select() drops baseline columns. An integration test would be needed to guard that.
     // Queue: [0] = agentRuntimeState row (private getRuntimeState call),
     //        [1] = agents row (getAgent call),
     //        [2] = agentTaskSessions row (latestTaskSession call)
