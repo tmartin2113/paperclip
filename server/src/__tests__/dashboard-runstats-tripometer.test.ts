@@ -62,17 +62,17 @@ function buildMockDb(
     return chain;
   }
 
-  const updateTerminal = Promise.resolve([]);
   function makeUpdateChain(): AnyRecord {
+    const terminal = Promise.resolve([]);
     const chain: AnyRecord = {};
     chain["set"] = (values: AnyRecord) => {
       setCalls.push(values);
       return makeUpdateChain();
     };
     chain["where"] = (..._args: unknown[]) => makeUpdateChain();
-    chain.then = updateTerminal.then.bind(updateTerminal);
-    chain.catch = updateTerminal.catch.bind(updateTerminal);
-    chain.finally = updateTerminal.finally.bind(updateTerminal);
+    chain.then = terminal.then.bind(terminal);
+    chain.catch = terminal.catch.bind(terminal);
+    chain.finally = terminal.finally.bind(terminal);
     return chain;
   }
 
@@ -186,7 +186,7 @@ describe("dashboardService.resetRunStats", () => {
     expect(call.runStatsResetAt).toBeInstanceOf(Date);
     const ts = (call.runStatsResetAt as Date).getTime();
     expect(ts).toBeGreaterThanOrEqual(before);
-    expect(ts).toBeLessThanOrEqual(after + 100); // 100ms slack for clock drift
+    expect(ts).toBeLessThanOrEqual(after);
   });
 
   it("sets runStatsResetAt to null when called with clear: true", async () => {
