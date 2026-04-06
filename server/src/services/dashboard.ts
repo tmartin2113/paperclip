@@ -179,35 +179,52 @@ export function dashboardService(db: Db) {
     },
 
     runStats: async (companyId: string) => {
-      const fourteenDaysAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
+      const [company] = await db
+        .select({ runStatsResetAt: companies.runStatsResetAt })
+        .from(companies)
+        .where(eq(companies.id, companyId));
 
-      const [stats] = await db
-        .select({
-          totalRuns: sql<number>`count(*)::int`,
-          succeededRuns: sql<number>`count(*) filter (where ${heartbeatRuns.status} = 'succeeded')::int`,
-          failedRuns: sql<number>`count(*) filter (where ${heartbeatRuns.status} = 'failed')::int`,
-          avgDurationMs: sql<number | null>`avg(extract(epoch from (${heartbeatRuns.finishedAt} - ${heartbeatRuns.startedAt})) * 1000)::int`,
-          avgInputTokens: sql<number | null>`avg(coalesce((${heartbeatRuns.usageJson} ->> 'inputTokens')::int, (${heartbeatRuns.usageJson} ->> 'input_tokens')::int))::int`,
-          avgOutputTokens: sql<number | null>`avg(coalesce((${heartbeatRuns.usageJson} ->> 'outputTokens')::int, (${heartbeatRuns.usageJson} ->> 'output_tokens')::int))::int`,
-        })
-        .from(heartbeatRuns)
-        .where(
-          and(
-            eq(heartbeatRuns.companyId, companyId),
-            ne(heartbeatRuns.invocationSource, "checkout_upsert"),
-            gte(heartbeatRuns.startedAt, fourteenDaysAgo),
-          ),
-        );
+      const resetAt = company?.runStatsResetAt ?? null;
 
-      const totalRuns = Number(stats.totalRuns);
+      const baseConditions = [
+        eq(heartbeatRuns.companyId, companyId),
+        ne(heartbeatRuns.invocationSource, "checkout_upsert"),
+      ];
+
+      const computeBlock = async (extraConditions: typeof baseConditions) => {
+        const [stats] = await db
+          .select({
+            totalRuns: sql<number>`count(*)::int`,
+            succeededRuns: sql<number>`count(*) filter (where ${heartbeatRuns.status} = 'succeeded')::int`,
+            failedRuns: sql<number>`count(*) filter (where ${heartbeatRuns.status} = 'failed')::int`,
+            avgDurationMs: sql<number | null>`avg(extract(epoch from (${heartbeatRuns.finishedAt} - ${heartbeatRuns.startedAt})) * 1000)::int`,
+            avgInputTokens: sql<number | null>`avg(coalesce((${heartbeatRuns.usageJson} ->> 'inputTokens')::int, (${heartbeatRuns.usageJson} ->> 'input_tokens')::int))::int`,
+            avgOutputTokens: sql<number | null>`avg(coalesce((${heartbeatRuns.usageJson} ->> 'outputTokens')::int, (${heartbeatRuns.usageJson} ->> 'output_tokens')::int))::int`,
+          })
+          .from(heartbeatRuns)
+          .where(and(...extraConditions));
+
+        const totalRuns = Number(stats.totalRuns);
+        return {
+          totalRuns,
+          succeededRuns: Number(stats.succeededRuns),
+          failedRuns: Number(stats.failedRuns),
+          successRate: totalRuns > 0 ? Number(((Number(stats.succeededRuns) / totalRuns) * 100).toFixed(1)) : 0,
+          avgDurationMs: stats.avgDurationMs ? Number(stats.avgDurationMs) : null,
+          avgInputTokens: stats.avgInputTokens ? Number(stats.avgInputTokens) : null,
+          avgOutputTokens: stats.avgOutputTokens ? Number(stats.avgOutputTokens) : null,
+        };
+      };
+
+      const lifetime = await computeBlock(baseConditions);
+      const sinceReset = resetAt
+        ? await computeBlock([...baseConditions, gte(heartbeatRuns.startedAt, resetAt)])
+        : null;
+
       return {
-        totalRuns,
-        succeededRuns: Number(stats.succeededRuns),
-        failedRuns: Number(stats.failedRuns),
-        successRate: totalRuns > 0 ? Number(((Number(stats.succeededRuns) / totalRuns) * 100).toFixed(1)) : 0,
-        avgDurationMs: stats.avgDurationMs ? Number(stats.avgDurationMs) : null,
-        avgInputTokens: stats.avgInputTokens ? Number(stats.avgInputTokens) : null,
-        avgOutputTokens: stats.avgOutputTokens ? Number(stats.avgOutputTokens) : null,
+        lifetime,
+        sinceReset,
+        resetAt: resetAt ? resetAt.toISOString() : null,
       };
     },
   };
