@@ -229,5 +229,12 @@ export function dashboardService(db: Db) {
         resetAt: resetAt ? resetAt.toISOString() : null,
       };
     },
+
+    resetRunStats: async (companyId: string, clear = false) => {
+      await db
+        .update(companies)
+        .set({ runStatsResetAt: clear ? null : new Date() })
+        .where(eq(companies.id, companyId));
+    },
   };
 }
