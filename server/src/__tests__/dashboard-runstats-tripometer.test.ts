@@ -23,18 +23,16 @@ import { dashboardService } from "../services/dashboard.js";
 type AnyRecord = Record<string, unknown>;
 
 /**
- * Builds a fake drizzle query chain.
+ * Builds a fake drizzle query chain backed by a FIFO result queue.
  *
  * Usage:
- *   const db = buildMockDb([row1, row2], companyRow);
+ *   const db = buildMockDb([firstSelectRows, secondSelectRows, ...]);
  *
- * The mock intercepts `.select().from().where()` chains and either:
- *   - returns the company row (when the table name contains "companies")
- *   - returns heartbeat_runs rows (all other selects)
- *
- * To support the Task 4 implementation (which will add a company lookup and
- * potentially two heartbeat_runs queries), each call to `.select()` pops the
- * next batch from `resultQueue`.
+ * Each call to `.select()` pops the next batch of rows from `resultQueue`,
+ * regardless of which table or columns are being queried. Tests push result
+ * batches in the exact order the service will issue its SELECT calls. This
+ * lets a single mock handle any number of queries without any table-name
+ * inspection.
  */
 function buildMockDb(
   resultQueue: AnyRecord[][],
@@ -62,9 +60,10 @@ function buildMockDb(
   for (const method of ["set", "where"]) {
     updateChain[method] = (..._args: unknown[]) => updateChain;
   }
-  updateChain.then = Promise.resolve([]).then.bind(Promise.resolve([]));
-  updateChain.catch = Promise.resolve([]).catch.bind(Promise.resolve([]));
-  updateChain.finally = Promise.resolve([]).finally.bind(Promise.resolve([]));
+  const updateTerminal = Promise.resolve([]);
+  updateChain.then = updateTerminal.then.bind(updateTerminal);
+  updateChain.catch = updateTerminal.catch.bind(updateTerminal);
+  updateChain.finally = updateTerminal.finally.bind(updateTerminal);
 
   return {
     select: (_fields?: unknown) => {
@@ -149,5 +148,7 @@ describe("dashboardService.runStats — tripometer behavior", () => {
     expect(stats.lifetime.totalRuns).toBe(1);
     expect(stats.sinceReset).not.toBeNull();
     expect(stats.sinceReset!.totalRuns).toBe(0);
+    expect(stats.sinceReset!.succeededRuns).toBe(0);
+    expect(stats.sinceReset!.failedRuns).toBe(0);
   });
 });
