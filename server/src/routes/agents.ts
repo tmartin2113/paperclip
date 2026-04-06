@@ -646,6 +646,21 @@ export function agentRoutes(db: Db) {
     res.json(state);
   });
 
+  router.post("/agents/:id/runtime-state/reset-tokens", async (req, res) => {
+    assertBoard(req);
+    const id = req.params.id as string;
+    const agent = await svc.getById(id);
+    if (!agent) {
+      res.status(404).json({ error: "Agent not found" });
+      return;
+    }
+    assertCompanyAccess(req, agent.companyId);
+
+    const clear = (req.body as { clear?: unknown } | undefined)?.clear === true;
+    await heartbeat.resetRuntimeStateTokens(id, clear);
+    res.status(204).end();
+  });
+
   router.post("/companies/:companyId/agent-hires", validate(createAgentHireSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
     await assertCanCreateAgentsForCompany(req, companyId);
