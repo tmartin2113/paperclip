@@ -34,6 +34,7 @@ import {
 } from "@/components/ui/popover";
 import {
   MoreHorizontal,
+  MoreVertical,
   Play,
   Pause,
   CheckCircle2,
@@ -54,6 +55,13 @@ import {
   ArrowLeft,
   Settings,
 } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { StatCard } from "@/components/StatCard";
 import { Input } from "@/components/ui/input";
 import { AgentIcon, AgentIconPicker } from "../components/AgentIconPicker";
 import { isUuidLike, type Agent, type HeartbeatRun, type HeartbeatRunEvent, type AgentRuntimeState, type LiveEvent } from "@paperclipai/shared";
@@ -817,7 +825,7 @@ function AgentOverview({
       {/* Costs */}
       <div className="space-y-3">
         <h3 className="text-sm font-medium">Costs</h3>
-        <CostsSection runtimeState={runtimeState} runs={runs} />
+        <CostsSection runtimeState={runtimeState} runs={runs} agentId={agentId} companyId={agent.companyId ?? undefined} />
       </div>
 
       {/* Configuration Summary */}
@@ -958,10 +966,41 @@ function ConfigSummary({
 function CostsSection({
   runtimeState,
   runs,
+  agentId,
+  companyId,
 }: {
   runtimeState?: AgentRuntimeState;
   runs: HeartbeatRun[];
+  agentId: string;
+  companyId?: string;
 }) {
+  const queryClient = useQueryClient();
+  const [resetTokensError, setResetTokensError] = useState<string | null>(null);
+  const resetTokensMutation = useMutation({
+    mutationFn: (clear: boolean) => agentsApi.resetRuntimeStateTokens(agentId, clear, companyId),
+    onSuccess: () => {
+      setResetTokensError(null);
+      queryClient.invalidateQueries({ queryKey: queryKeys.agents.runtimeState(agentId) });
+    },
+    onError: (err) => {
+      setResetTokensError(err instanceof Error ? err.message : "Failed to reset token counters");
+    },
+  });
+
+  const tokensResetAtStr = runtimeState?.tokensResetAt instanceof Date
+    ? runtimeState.tokensResetAt.toISOString()
+    : (runtimeState?.tokensResetAt ?? null);
+
+  const sinceReset = tokensResetAtStr
+    ? {
+        inputTokens: (runtimeState!.totalInputTokens - runtimeState!.totalInputTokensBaseline),
+        outputTokens: (runtimeState!.totalOutputTokens - runtimeState!.totalOutputTokensBaseline),
+        cachedInputTokens:
+          (runtimeState!.totalCachedInputTokens - runtimeState!.totalCachedInputTokensBaseline),
+        costCents: (runtimeState!.totalCostCents - runtimeState!.totalCostCentsBaseline),
+      }
+    : null;
+
   const runsWithCost = runs
     .filter((r) => {
       const u = r.usageJson as Record<string, unknown> | null;
@@ -972,24 +1011,65 @@ function CostsSection({
   return (
     <div className="space-y-4">
       {runtimeState && (
-        <div className="border border-border rounded-lg p-4">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <div>
-              <span className="text-xs text-muted-foreground block">Input tokens</span>
-              <span className="text-lg font-semibold">{formatTokens(runtimeState.totalInputTokens)}</span>
-            </div>
-            <div>
-              <span className="text-xs text-muted-foreground block">Output tokens</span>
-              <span className="text-lg font-semibold">{formatTokens(runtimeState.totalOutputTokens)}</span>
-            </div>
-            <div>
-              <span className="text-xs text-muted-foreground block">Cached tokens</span>
-              <span className="text-lg font-semibold">{formatTokens(runtimeState.totalCachedInputTokens)}</span>
-            </div>
-            <div>
-              <span className="text-xs text-muted-foreground block">Total cost</span>
-              <span className="text-lg font-semibold">{formatCents(runtimeState.totalCostCents)}</span>
-            </div>
+        <div className="rounded-lg border bg-card">
+          <div className="flex items-center justify-between border-b px-4 py-2">
+            <div className="text-sm font-medium">Token usage &amp; cost</div>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                  aria-label="Token panel menu"
+                >
+                  <MoreVertical className="h-4 w-4" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem
+                  onSelect={() => resetTokensMutation.mutate(false)}
+                  disabled={resetTokensMutation.isPending}
+                >
+                  Reset counter
+                </DropdownMenuItem>
+                {tokensResetAtStr !== null && (
+                  <DropdownMenuItem
+                    onSelect={() => resetTokensMutation.mutate(true)}
+                    disabled={resetTokensMutation.isPending}
+                  >
+                    Show all-time
+                  </DropdownMenuItem>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+          {resetTokensError && (
+            <p className="text-sm text-destructive px-4 py-2">{resetTokensError}</p>
+          )}
+          <div className="grid grid-cols-2 gap-3 p-4 sm:grid-cols-4">
+            <StatCard
+              label="Input tokens"
+              lifetime={runtimeState.totalInputTokens.toLocaleString()}
+              sinceReset={sinceReset ? sinceReset.inputTokens.toLocaleString() : null}
+              resetAt={tokensResetAtStr}
+            />
+            <StatCard
+              label="Output tokens"
+              lifetime={runtimeState.totalOutputTokens.toLocaleString()}
+              sinceReset={sinceReset ? sinceReset.outputTokens.toLocaleString() : null}
+              resetAt={tokensResetAtStr}
+            />
+            <StatCard
+              label="Cached tokens"
+              lifetime={runtimeState.totalCachedInputTokens.toLocaleString()}
+              sinceReset={sinceReset ? sinceReset.cachedInputTokens.toLocaleString() : null}
+              resetAt={tokensResetAtStr}
+            />
+            <StatCard
+              label="Total cost"
+              lifetime={formatCents(runtimeState.totalCostCents)}
+              sinceReset={sinceReset ? formatCents(sinceReset.costCents) : null}
+              resetAt={tokensResetAtStr}
+            />
           </div>
         </div>
       )}
