@@ -211,6 +211,13 @@
       "when": 1775487500412,
       "tag": "0029_next_moon_knight",
       "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1775487958822,
+      "tag": "0030_overjoyed_mentor",
+      "breakpoints": true
     }
   ]
 }
