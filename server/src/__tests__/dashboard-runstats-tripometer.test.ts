@@ -34,10 +34,16 @@ type AnyRecord = Record<string, unknown>;
  * lets a single mock handle any number of queries without any table-name
  * inspection.
  */
+type MockDb = {
+  db: Pick<Db, "select" | "update">;
+  setCalls: AnyRecord[];
+};
+
 function buildMockDb(
   resultQueue: AnyRecord[][],
-): Pick<Db, "select" | "update"> {
+): MockDb {
   let callIndex = 0;
+  const setCalls: AnyRecord[] = [];
 
   function makeChain(rows: AnyRecord[]): unknown {
     const chain: AnyRecord = {};
@@ -56,25 +62,32 @@ function buildMockDb(
     return chain;
   }
 
-  const updateChain: AnyRecord = {};
-  for (const method of ["set", "where"]) {
-    updateChain[method] = (..._args: unknown[]) => updateChain;
-  }
   const updateTerminal = Promise.resolve([]);
-  updateChain.then = updateTerminal.then.bind(updateTerminal);
-  updateChain.catch = updateTerminal.catch.bind(updateTerminal);
-  updateChain.finally = updateTerminal.finally.bind(updateTerminal);
+  function makeUpdateChain(): AnyRecord {
+    const chain: AnyRecord = {};
+    chain["set"] = (values: AnyRecord) => {
+      setCalls.push(values);
+      return makeUpdateChain();
+    };
+    chain["where"] = (..._args: unknown[]) => makeUpdateChain();
+    chain.then = updateTerminal.then.bind(updateTerminal);
+    chain.catch = updateTerminal.catch.bind(updateTerminal);
+    chain.finally = updateTerminal.finally.bind(updateTerminal);
+    return chain;
+  }
 
-  return {
+  const db: Pick<Db, "select" | "update"> = {
     select: (_fields?: unknown) => {
       const batch = resultQueue[callIndex] ?? [];
       callIndex++;
       return makeChain(batch) as ReturnType<Db["select"]>;
     },
     update: (_table?: unknown) => {
-      return updateChain as ReturnType<Db["update"]>;
+      return makeUpdateChain() as ReturnType<Db["update"]>;
     },
   } as unknown as Pick<Db, "select" | "update">;
+
+  return { db, setCalls };
 }
 
 // ---------------------------------------------------------------------------
@@ -86,14 +99,14 @@ describe("dashboardService.runStats — tripometer behavior", () => {
 
   it("returns lifetime stats and sinceReset === null when runStatsResetAt is null", async () => {
     // Queue: [0] = company row (no resetAt), [1] = lifetime heartbeat_runs aggregate
-    const db = buildMockDb([
+    const mock = buildMockDb([
       // company row
       [{ id: companyId, runStatsResetAt: null }],
       // lifetime aggregate rows
       [{ totalRuns: 2, succeededRuns: 1, failedRuns: 1, avgDurationMs: 1000, avgInputTokens: null, avgOutputTokens: null }],
     ]);
 
-    const svc = dashboardService(db as unknown as Db);
+    const svc = dashboardService(mock.db as unknown as Db);
     const stats = await svc.runStats(companyId);
 
     // These assertions intentionally target the NEW shape.
@@ -109,7 +122,7 @@ describe("dashboardService.runStats — tripometer behavior", () => {
     const now = Date.now();
     const resetAt = new Date(now - 12 * 60 * 60 * 1000); // 12 hours ago
 
-    const db = buildMockDb([
+    const mock = buildMockDb([
       // company row with resetAt
       [{ id: companyId, runStatsResetAt: resetAt }],
       // lifetime aggregate (3 total runs: 1 before + 2 after reset)
@@ -118,7 +131,7 @@ describe("dashboardService.runStats — tripometer behavior", () => {
       [{ totalRuns: 2, succeededRuns: 1, failedRuns: 1, avgDurationMs: null, avgInputTokens: null, avgOutputTokens: null }],
     ]);
 
-    const svc = dashboardService(db as unknown as Db);
+    const svc = dashboardService(mock.db as unknown as Db);
     const stats = await svc.runStats(companyId);
 
     expect(stats.lifetime.totalRuns).toBe(3);
@@ -133,7 +146,7 @@ describe("dashboardService.runStats — tripometer behavior", () => {
     const now = Date.now();
     const futureResetAt = new Date(now + 60 * 60 * 1000); // 1 hour in the future
 
-    const db = buildMockDb([
+    const mock = buildMockDb([
       // company row with future resetAt
       [{ id: companyId, runStatsResetAt: futureResetAt }],
       // lifetime aggregate (1 run)
@@ -142,7 +155,7 @@ describe("dashboardService.runStats — tripometer behavior", () => {
       [{ totalRuns: 0, succeededRuns: 0, failedRuns: 0, avgDurationMs: null, avgInputTokens: null, avgOutputTokens: null }],
     ]);
 
-    const svc = dashboardService(db as unknown as Db);
+    const svc = dashboardService(mock.db as unknown as Db);
     const stats = await svc.runStats(companyId);
 
     expect(stats.lifetime.totalRuns).toBe(1);
@@ -150,5 +163,39 @@ describe("dashboardService.runStats — tripometer behavior", () => {
     expect(stats.sinceReset!.totalRuns).toBe(0);
     expect(stats.sinceReset!.succeededRuns).toBe(0);
     expect(stats.sinceReset!.failedRuns).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resetRunStats tests (failing until Task 6 implements the method)
+// ---------------------------------------------------------------------------
+
+describe("dashboardService.resetRunStats", () => {
+  const companyIdFixture = "00000000-0000-0000-0000-000000000001";
+
+  it("sets runStatsResetAt to now when called without clear", async () => {
+    const mock = buildMockDb([]); // no selects needed for reset
+    const svc = dashboardService(mock.db as unknown as Db);
+
+    const before = Date.now();
+    await svc.resetRunStats(companyIdFixture);
+    const after = Date.now();
+
+    expect(mock.setCalls).toHaveLength(1);
+    const call = mock.setCalls[0];
+    expect(call.runStatsResetAt).toBeInstanceOf(Date);
+    const ts = (call.runStatsResetAt as Date).getTime();
+    expect(ts).toBeGreaterThanOrEqual(before);
+    expect(ts).toBeLessThanOrEqual(after + 100); // 100ms slack for clock drift
+  });
+
+  it("sets runStatsResetAt to null when called with clear: true", async () => {
+    const mock = buildMockDb([]); // no selects needed
+    const svc = dashboardService(mock.db as unknown as Db);
+
+    await svc.resetRunStats(companyIdFixture, true);
+
+    expect(mock.setCalls).toHaveLength(1);
+    expect(mock.setCalls[0].runStatsResetAt).toBeNull();
   });
 });
