@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@/lib/router";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { dashboardApi } from "../api/dashboard";
 import { activityApi } from "../api/activity";
 import { issuesApi } from "../api/issues";
@@ -18,7 +18,14 @@ import { PriorityIcon } from "../components/PriorityIcon";
 import { ActivityRow } from "../components/ActivityRow";
 import { Identity } from "../components/Identity";
 import { timeAgo } from "../lib/timeAgo";
-import { Bot, CircleDot, ShieldCheck, LayoutDashboard, Activity, CheckCircle, Clock } from "lucide-react";
+import { Bot, CircleDot, ShieldCheck, LayoutDashboard, MoreVertical } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { StatCard } from "@/components/StatCard";
 import { ActiveAgentsPanel } from "../components/ActiveAgentsPanel";
 import { RunsTable } from "../components/RunsTable";
 import { ChartCard, RunActivityChart, PriorityChart, IssueStatusChart } from "../components/ActivityCharts";
@@ -89,6 +96,14 @@ export function Dashboard() {
     queryKey: queryKeys.dashboardRunStats(selectedCompanyId!),
     queryFn: () => dashboardApi.runStats(selectedCompanyId!),
     enabled: !!selectedCompanyId,
+  });
+
+  const queryClient = useQueryClient();
+  const resetRunStatsMutation = useMutation({
+    mutationFn: (clear: boolean) => dashboardApi.resetRunStats(selectedCompanyId!, clear),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.dashboardRunStats(selectedCompanyId!) });
+    },
   });
 
   const recentIssues = issues ? getRecentIssues(issues) : [];
@@ -274,25 +289,61 @@ export function Dashboard() {
 
           {/* Agent Performance */}
           {runStats && (
-            <div className="grid grid-cols-2 xl:grid-cols-3 gap-1 sm:gap-2">
-              <MetricCard
-                icon={Activity}
-                value={runStats.totalRuns}
-                label="Total Runs (14d)"
-              />
-              <MetricCard
-                icon={CheckCircle}
-                value={`${runStats.successRate}%`}
-                label="Success Rate"
-                description={
-                  <span>{runStats.succeededRuns} succeeded, {runStats.failedRuns} failed</span>
-                }
-              />
-              <MetricCard
-                icon={Clock}
-                value={runStats.avgDurationMs != null ? `${Math.round(runStats.avgDurationMs / 1000)}s` : "—"}
-                label="Avg Duration"
-              />
+            <div className="rounded-lg border bg-card">
+              <div className="flex items-center justify-between border-b px-4 py-2">
+                <div className="text-sm font-medium">Run statistics</div>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <button
+                      type="button"
+                      className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                      aria-label="Run statistics menu"
+                    >
+                      <MoreVertical className="h-4 w-4" />
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem
+                      onSelect={() => resetRunStatsMutation.mutate(false)}
+                      disabled={resetRunStatsMutation.isPending}
+                    >
+                      Reset counter
+                    </DropdownMenuItem>
+                    {runStats.resetAt !== null && (
+                      <DropdownMenuItem
+                        onSelect={() => resetRunStatsMutation.mutate(true)}
+                        disabled={resetRunStatsMutation.isPending}
+                      >
+                        Show all-time
+                      </DropdownMenuItem>
+                    )}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
+              <div className="grid grid-cols-1 gap-3 p-4 sm:grid-cols-3">
+                <StatCard
+                  label="Total runs"
+                  lifetime={runStats.lifetime.totalRuns}
+                  sinceReset={runStats.sinceReset?.totalRuns ?? null}
+                  resetAt={runStats.resetAt}
+                />
+                <StatCard
+                  label="Success rate"
+                  lifetime={`${runStats.lifetime.successRate}%`}
+                  sinceReset={runStats.sinceReset !== null ? `${runStats.sinceReset.successRate}%` : null}
+                  resetAt={runStats.resetAt}
+                />
+                <StatCard
+                  label="Avg duration"
+                  lifetime={runStats.lifetime.avgDurationMs != null ? `${Math.round(runStats.lifetime.avgDurationMs / 1000)}s` : "—"}
+                  sinceReset={
+                    runStats.sinceReset?.avgDurationMs != null
+                      ? `${Math.round(runStats.sinceReset.avgDurationMs / 1000)}s`
+                      : null
+                  }
+                  resetAt={runStats.resetAt}
+                />
+              </div>
             </div>
           )}
 

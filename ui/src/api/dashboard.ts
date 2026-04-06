@@ -19,7 +19,7 @@ export interface DashboardRun {
   createdAt: string;
 }
 
-export interface DashboardRunStats {
+export interface DashboardRunStatsBlock {
   totalRuns: number;
   succeededRuns: number;
   failedRuns: number;
@@ -29,8 +29,16 @@ export interface DashboardRunStats {
   avgOutputTokens: number | null;
 }
 
+export interface DashboardRunStats {
+  lifetime: DashboardRunStatsBlock;
+  sinceReset: DashboardRunStatsBlock | null;
+  resetAt: string | null;
+}
+
 export const dashboardApi = {
   summary: (companyId: string) => api.get<DashboardSummary>(`/companies/${companyId}/dashboard`),
   runs: (companyId: string) => api.get<DashboardRun[]>(`/companies/${companyId}/dashboard/runs`),
   runStats: (companyId: string) => api.get<DashboardRunStats>(`/companies/${companyId}/dashboard/run-stats`),
+  resetRunStats: (companyId: string, clear = false) =>
+    api.post<void>(`/companies/${encodeURIComponent(companyId)}/dashboard/run-stats/reset`, { clear }),
 };
