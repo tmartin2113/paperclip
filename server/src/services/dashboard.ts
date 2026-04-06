@@ -184,7 +184,9 @@ export function dashboardService(db: Db) {
         .from(companies)
         .where(eq(companies.id, companyId));
 
-      const resetAt = company?.runStatsResetAt ?? null;
+      if (!company) throw notFound("Company not found");
+
+      const resetAt = company.runStatsResetAt ?? null;
 
       const baseConditions = [
         eq(heartbeatRuns.companyId, companyId),
