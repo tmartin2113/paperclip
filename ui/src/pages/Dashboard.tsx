@@ -330,6 +330,7 @@ export function Dashboard() {
                 <StatCard
                   label="Success rate"
                   lifetime={`${runStats.lifetime.successRate}%`}
+                  description={`${runStats.lifetime.succeededRuns} succeeded, ${runStats.lifetime.failedRuns} failed`}
                   sinceReset={runStats.sinceReset !== null ? `${runStats.sinceReset.successRate}%` : null}
                   resetAt={runStats.resetAt}
                 />
