@@ -1,0 +1,1 @@
+ALTER TABLE "companies" ADD COLUMN "run_stats_reset_at" timestamp with time zone;

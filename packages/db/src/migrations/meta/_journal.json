@@ -204,6 +204,13 @@
       "when": 1773897600000,
       "tag": "0028_agent_managers",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1775487500412,
+      "tag": "0029_next_moon_knight",
+      "breakpoints": true
     }
   ]
 }
