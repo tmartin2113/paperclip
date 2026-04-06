@@ -40,5 +40,5 @@ export const dashboardApi = {
   runs: (companyId: string) => api.get<DashboardRun[]>(`/companies/${companyId}/dashboard/runs`),
   runStats: (companyId: string) => api.get<DashboardRunStats>(`/companies/${companyId}/dashboard/run-stats`),
   resetRunStats: (companyId: string, clear = false) =>
-    api.post<void>(`/companies/${encodeURIComponent(companyId)}/dashboard/run-stats/reset`, { clear }),
+    api.post<void>(`/companies/${companyId}/dashboard/run-stats/reset`, { clear }),
 };

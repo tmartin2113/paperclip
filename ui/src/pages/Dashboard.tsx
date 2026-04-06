@@ -98,11 +98,16 @@ export function Dashboard() {
     enabled: !!selectedCompanyId,
   });
 
+  const [resetError, setResetError] = useState<string | null>(null);
   const queryClient = useQueryClient();
   const resetRunStatsMutation = useMutation({
     mutationFn: (clear: boolean) => dashboardApi.resetRunStats(selectedCompanyId!, clear),
     onSuccess: () => {
+      setResetError(null);
       queryClient.invalidateQueries({ queryKey: queryKeys.dashboardRunStats(selectedCompanyId!) });
+    },
+    onError: (err) => {
+      setResetError(err instanceof Error ? err.message : "Failed to reset run statistics");
     },
   });
 
@@ -320,6 +325,7 @@ export function Dashboard() {
                   </DropdownMenuContent>
                 </DropdownMenu>
               </div>
+              {resetError && <p className="text-sm text-destructive px-4 py-2">{resetError}</p>}
               <div className="grid grid-cols-1 gap-3 p-4 sm:grid-cols-3">
                 <StatCard
                   label="Total runs"
