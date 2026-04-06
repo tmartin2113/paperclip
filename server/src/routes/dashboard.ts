@@ -28,5 +28,13 @@ export function dashboardRoutes(db: Db) {
     res.json(stats);
   });
 
+  router.post("/companies/:companyId/dashboard/run-stats/reset", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    const clear = (req.body as { clear?: unknown } | undefined)?.clear === true;
+    await svc.resetRunStats(companyId, clear);
+    res.status(204).end();
+  });
+
   return router;
 }
