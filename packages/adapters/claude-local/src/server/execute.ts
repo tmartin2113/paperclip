@@ -540,12 +540,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const dangerouslySkipPermissions = asBoolean(config.dangerouslySkipPermissions, false);
   const instructionsFilePath = asString(config.instructionsFilePath, "").trim();
   const instructionsFileDir = instructionsFilePath ? `${path.dirname(instructionsFilePath)}/` : "";
-  const commandNotes = instructionsFilePath
-    ? [
-        `Injected agent instructions via --append-system-prompt-file ${instructionsFilePath} (with path directive appended)`,
-      ]
-    : [];
-
   const runtimeConfig = await buildClaudeRuntimeConfig({
     runId,
     agent,
@@ -614,18 +608,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     env.PAPERCLIP_OPENCLAW_SKILLS_DIR = openclawDir;
   }
 
-  // When instructionsFilePath is configured, create a combined temp file that
-  // includes both the file content and the path directive, so we only need
-  // --append-system-prompt-file (Claude CLI forbids using both flags together).
-  let effectiveInstructionsFilePath = instructionsFilePath;
-  if (instructionsFilePath) {
-    const instructionsContent = await fs.readFile(instructionsFilePath, "utf-8");
-    const pathDirective = `\nThe above agent instructions were loaded from ${instructionsFilePath}. Resolve any relative file references from ${instructionsFileDir}.`;
-    const combinedPath = path.join(skillsDir, "agent-instructions.md");
-    await fs.writeFile(combinedPath, instructionsContent + pathDirective, "utf-8");
-    effectiveInstructionsFilePath = combinedPath;
-  }
-
   const runtimeSessionParams = parseObject(runtime.sessionParams);
   const runtimeSessionId = asString(runtimeSessionParams.sessionId, runtime.sessionId ?? "");
   const runtimeSessionCwd = asString(runtimeSessionParams.cwd, "");
@@ -634,11 +616,37 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     (runtimeSessionCwd.length === 0 || path.resolve(runtimeSessionCwd) === path.resolve(cwd));
   const sessionId = canResumeSession ? runtimeSessionId : null;
   if (runtimeSessionId && !canResumeSession) {
-    await safeOnLog(
-      "stderr",
+    await onLog(
+      "stdout",
       `[paperclip] Claude session "${runtimeSessionId}" was saved for cwd "${runtimeSessionCwd}" and will not be resumed in "${cwd}".\n`,
     );
   }
+
+  // When instructionsFilePath is configured, create a combined temp file that
+  // includes both the file content and the path directive, so we only need
+  // --append-system-prompt-file (Claude CLI forbids using both flags together).
+  // Skipped on resumed sessions — the instructions are already baked into the
+  // session cache and re-injecting them wastes tokens.
+  let effectiveInstructionsFilePath: string | undefined = instructionsFilePath;
+  if (instructionsFilePath && !canResumeSession) {
+    try {
+      const instructionsContent = await fs.readFile(instructionsFilePath, "utf-8");
+      const pathDirective = `\nThe above agent instructions were loaded from ${instructionsFilePath}. Resolve any relative file references from ${instructionsFileDir}.`;
+      const combinedPath = path.join(skillsDir, "agent-instructions.md");
+      await fs.writeFile(combinedPath, instructionsContent + pathDirective, "utf-8");
+      effectiveInstructionsFilePath = combinedPath;
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      await onLog(
+        "stderr",
+        `[paperclip] Warning: could not read agent instructions file "${instructionsFilePath}": ${reason}\n`,
+      );
+      effectiveInstructionsFilePath = undefined;
+    }
+  } else if (canResumeSession) {
+    effectiveInstructionsFilePath = undefined;
+  }
+
   const prompt = renderTemplate(promptTemplate, {
     agentId: agent.id,
     companyId: agent.companyId,
