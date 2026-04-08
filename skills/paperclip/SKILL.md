@@ -71,6 +71,8 @@ If the file is missing or empty, or the checkout returns 409, fall back to the f
 
 Follow these steps every time you wake up. Read the Key Endpoints table above before making any API calls. Do NOT guess endpoint URLs.
 
+**Scoped-wake fast path.** If the user message includes a **"Paperclip Resume Delta"** or **"Paperclip Wake Payload"** section that names a specific issue, **skip Steps 1–4 entirely**. Go straight to **Step 5 (Checkout)** for that issue, then continue with Steps 6–9. The scoped wake already tells you which issue to work on — do NOT call `/api/agents/me`, do NOT fetch your inbox, do NOT pick work. Just checkout, read the wake context, do the work, and update.
+
 **Step 1 — Identity.** If env `PAPERCLIP_AGENT_ID` is set, you already have your ID. Only call `GET /api/agents/me` if you need role, chainOfCommand, or budget info.
 
 **Step 2 — Approval follow-up (when triggered).** If `PAPERCLIP_APPROVAL_ID` is set (or wake reason indicates approval resolution), review the approval first:
