@@ -207,3 +207,91 @@ export function isClaudeUsageLimitResult(parsed: Record<string, unknown> | null 
 
   return allMessages.some((msg) => CLAUDE_USAGE_LIMIT_RE.test(msg));
 }
+
+// Matches a reset-time hint in the Claude CLI usage-limit error text.
+// Captures hour, optional minute, optional am/pm. Handles:
+//   "resets 10am (UTC)"        → 10, -, am
+//   "resets at 10am UTC"       → 10, -, am
+//   "resets 2:30pm (UTC)"      → 2, 30, pm
+//   "resets 14:00 UTC"         → 14, 00, -
+//   "Usage limit reached — resets at 10am UTC"  → 10, -, am
+//
+// Only run this on messages CLAUDE_USAGE_LIMIT_RE has already matched.
+const CLAUDE_RESET_TIME_RE =
+  /resets\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:\(?(?:UTC|GMT)\)?)?/i;
+
+/**
+ * Returns the next reset time implied by a Claude CLI usage-limit error
+ * message, as an ISO 8601 string in UTC, or `null` if no parseable reset
+ * hint could be found.
+ *
+ * Absolute-time cases (the only ones Claude's CLI currently emits) are
+ * interpreted in UTC — the phrasing "resets 10am (UTC)" means "next time
+ * the wall clock passes 10:00 UTC". If that's later today, it's today;
+ * otherwise it's tomorrow.
+ *
+ * Conservative: if we can't confidently parse, return `null` so the
+ * caller doesn't schedule a deferral to the wrong time. Null → fall back
+ * to no auto-resume scheduling (the agent stays idle until externally
+ * woken, same as the behavior before reset-time extraction).
+ *
+ * Exported for unit testing and for heartbeat-layer consumption.
+ */
+export function extractClaudeUsageLimitReset(
+  parsed: Record<string, unknown> | null | undefined,
+  now: Date = new Date(),
+): string | null {
+  if (!parsed) return null;
+
+  const resultText = asString(parsed.result, "").trim();
+  const allMessages = [resultText, ...extractClaudeErrorMessages(parsed)]
+    .map((msg) => msg.trim())
+    .filter(Boolean);
+
+  // Only attempt extraction on messages we've already classified as a
+  // usage-limit hit, so unrelated text containing words like "resets 10am"
+  // (e.g. task output about a config file) can't trip the parser.
+  for (const msg of allMessages) {
+    if (!CLAUDE_USAGE_LIMIT_RE.test(msg)) continue;
+
+    const m = msg.match(CLAUDE_RESET_TIME_RE);
+    if (!m) continue;
+
+    let hour = parseInt(m[1]!, 10);
+    const minute = m[2] != null ? parseInt(m[2], 10) : 0;
+    const ampm = m[3]?.toLowerCase();
+
+    if (Number.isNaN(hour) || hour < 0 || hour > 23) continue;
+    if (Number.isNaN(minute) || minute < 0 || minute > 59) continue;
+
+    // Convert 12-hour with am/pm → 24-hour. 12am = 00:00, 12pm = 12:00.
+    if (ampm === "am") {
+      if (hour === 12) hour = 0;
+      else if (hour > 12) continue; // nonsensical "13am" — skip
+    } else if (ampm === "pm") {
+      if (hour !== 12) hour += 12;
+    }
+    // If neither am/pm is given, assume 24-hour (which the regex allows
+    // via "14:00 UTC" style).
+
+    // Build "today at HH:MM UTC". If that's already in the past relative
+    // to `now`, roll to tomorrow.
+    const candidate = new Date(
+      Date.UTC(
+        now.getUTCFullYear(),
+        now.getUTCMonth(),
+        now.getUTCDate(),
+        hour,
+        minute,
+        0,
+        0,
+      ),
+    );
+    if (candidate.getTime() <= now.getTime()) {
+      candidate.setUTCDate(candidate.getUTCDate() + 1);
+    }
+    return candidate.toISOString();
+  }
+
+  return null;
+}

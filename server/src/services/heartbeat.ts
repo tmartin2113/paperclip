@@ -642,6 +642,48 @@ export function heartbeatService(db: Db) {
       .then((rows) => rows[0] ?? null);
   }
 
+  /**
+   * Returns the usage-limit reset time for an agent, or null if no active
+   * deferral applies.
+   *
+   * A deferral is "active" when the agent's MOST RECENT heartbeat run
+   * (per agent_runtime_state.lastRunId) failed with errorCode
+   * `"claude_usage_limited"` AND its `errorMeta.usageLimitResetsAt` is
+   * still in the future. If the latest run was a success (or any other
+   * failure class), no deferral applies even if an earlier run had a
+   * usage-limit hit — a newer successful run means the agent has
+   * already recovered.
+   *
+   * Read-only: does not mutate runtime state. Safe to call from any
+   * wake-enqueue path.
+   */
+  async function getUsageLimitDeferralUntil(agentId: string): Promise<Date | null> {
+    const runtime = await getRuntimeState(agentId);
+    if (!runtime?.lastRunId) return null;
+
+    // Pull the actual run row so we can read errorCode + errorMeta without
+    // needing another column on runtime state.
+    const lastRun = await db
+      .select({
+        errorCode: heartbeatRuns.errorCode,
+        resultJson: heartbeatRuns.resultJson,
+      })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runtime.lastRunId))
+      .then((rows) => rows[0] ?? null);
+    if (!lastRun) return null;
+    if (lastRun.errorCode !== "claude_usage_limited") return null;
+
+    const resultJson = lastRun.resultJson as Record<string, unknown> | null;
+    const errorMeta = resultJson?.errorMeta as Record<string, unknown> | undefined;
+    const resetsAt = errorMeta?.usageLimitResetsAt;
+    if (typeof resetsAt !== "string" || !resetsAt) return null;
+
+    const parsed = new Date(resetsAt);
+    if (Number.isNaN(parsed.getTime())) return null;
+    return parsed;
+  }
+
   async function getTaskSession(
     companyId: string,
     agentId: string,
@@ -1752,6 +1794,12 @@ export function heartbeatService(db: Db) {
         usageJson,
         resultJson: {
           ...(adapterResult.resultJson ?? {}),
+          // Persist errorMeta into resultJson so post-hoc queries (e.g.
+          // the usage-limit deferral check in enqueueWakeup) can recover
+          // structured failure hints like `usageLimitResetsAt`. errorMeta
+          // is otherwise a transient annotation — the adapter returns it
+          // but no other column stores it.
+          ...(adapterResult.errorMeta ? { errorMeta: adapterResult.errorMeta } : {}),
           qualityScore: computeRunQualityScore({
             outcome,
             startedAt: run.startedAt ? new Date(run.startedAt) : null,
@@ -2224,6 +2272,23 @@ export function heartbeatService(db: Db) {
     }
     if (source !== "timer" && !policy.wakeOnDemand) {
       await writeSkippedRequest("heartbeat.wakeOnDemand.disabled");
+      return null;
+    }
+
+    // Usage-limit deferral: if this agent's most recent run failed with
+    // `claude_usage_limited` and carried a `usageLimitResetsAt` hint in its
+    // errorMeta, skip enqueueing new wakes until the reset has passed. This
+    // complements the runtime self-wake gate in `shouldSelfWake` — that one
+    // prevents the tight loop on the FAILING run's own self-wake, this one
+    // prevents incoming wakes from any source (inbox_remaining, assignment,
+    // comment wakeups, etc.) from immediately re-hitting the same limit.
+    const deferUntil = await getUsageLimitDeferralUntil(agentId);
+    if (deferUntil && deferUntil.getTime() > Date.now()) {
+      logger.info(
+        { agentId, source, reason, deferUntil: deferUntil.toISOString() },
+        "Skipping wake — Claude usage limit not yet reset",
+      );
+      await writeSkippedRequest("claude_usage_limit.deferred");
       return null;
     }
 

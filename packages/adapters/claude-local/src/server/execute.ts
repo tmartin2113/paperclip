@@ -23,6 +23,7 @@ import {
   parseClaudeStreamJson,
   describeClaudeFailure,
   detectClaudeLoginRequired,
+  extractClaudeUsageLimitReset,
   isClaudeMaxTurnsResult,
   isClaudeUnknownSessionError,
   isClaudeUsageLimitResult,
@@ -761,9 +762,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       // Without a parsed stream result we can only look at the raw stdout/
       // stderr for a usage-limit marker. This covers the edge case where the
       // Claude CLI errors out early without producing a structured result.
-      const usageLimited = isClaudeUsageLimitResult({
-        result: [proc.stdout, proc.stderr].join("\n"),
-      });
+      const stdoutStderr = { result: [proc.stdout, proc.stderr].join("\n") };
+      const usageLimited = isClaudeUsageLimitResult(stdoutStderr);
+      const usageLimitResetsAt = usageLimited
+        ? extractClaudeUsageLimitReset(stdoutStderr)
+        : null;
+      const mergedErrorMeta = usageLimitResetsAt
+        ? { ...(errorMeta ?? {}), usageLimitResetsAt }
+        : errorMeta;
       return {
         exitCode: proc.exitCode,
         signal: proc.signal,
@@ -774,7 +780,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           : usageLimited
             ? "claude_usage_limited"
             : null,
-        errorMeta,
+        errorMeta: mergedErrorMeta,
         resultJson: {
           stdout: proc.stdout,
           stderr: proc.stderr,
@@ -812,8 +818,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     // stream result is often shaped `{subtype: "success", result: "You've hit
     // your limit · resets 10am (UTC)"}`. Tag it explicitly so the heartbeat's
     // SYSTEMIC_ERROR_CODES set rejects it from self-wake and the agent
-    // doesn't tight-loop 429-ing against the same limit.
+    // doesn't tight-loop 429-ing against the same limit. Also extract the
+    // reset time (if parseable) into errorMeta so the heartbeat can skip
+    // enqueueing new wakes until the limit has reset.
     const usageLimited = isClaudeUsageLimitResult(parsed);
+    const usageLimitResetsAt = usageLimited
+      ? extractClaudeUsageLimitReset(parsed)
+      : null;
+    const mergedErrorMeta = usageLimitResetsAt
+      ? { ...(errorMeta ?? {}), usageLimitResetsAt }
+      : errorMeta;
     return {
       exitCode: proc.exitCode,
       signal: proc.signal,
@@ -827,7 +841,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         : usageLimited
           ? "claude_usage_limited"
           : null,
-      errorMeta,
+      errorMeta: mergedErrorMeta,
       usage,
       sessionId: resolvedSessionId,
       sessionParams: resolvedSessionParams,

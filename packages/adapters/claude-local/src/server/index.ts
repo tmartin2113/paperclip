@@ -6,6 +6,7 @@ export {
   isClaudeMaxTurnsResult,
   isClaudeUnknownSessionError,
   isClaudeUsageLimitResult,
+  extractClaudeUsageLimitReset,
 } from "./parse.js";
 import type { AdapterSessionCodec } from "@paperclipai/adapter-utils";
 
