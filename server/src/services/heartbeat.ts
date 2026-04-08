@@ -1228,11 +1228,16 @@ export function heartbeatService(db: Db) {
     const staleThresholdMs = opts?.staleThresholdMs ?? 0;
     const now = new Date();
 
-    // Find all runs in "queued" or "running" state
+    // Find all runs stuck in "running" state. Queued runs are legitimately
+    // waiting on concurrency limits or issue locks; they do NOT have an
+    // entry in `runningProcesses`, so including them caused false
+    // `process_lost` failures when they were picked up by the reaper.
+    // Queued runs are driven forward by `startNextQueuedRunForAgent` and
+    // `tickTimers` instead.
     const activeRuns = await db
       .select()
       .from(heartbeatRuns)
-      .where(inArray(heartbeatRuns.status, ["queued", "running"]));
+      .where(eq(heartbeatRuns.status, "running"));
 
     const reaped: string[] = [];
 
