@@ -647,6 +647,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     effectiveInstructionsFilePath = undefined;
   }
 
+  const commandNotes =
+    instructionsFilePath && !sessionId
+      ? [
+          `Injected agent instructions via --append-system-prompt-file ${instructionsFilePath} (with path directive appended)`,
+        ]
+      : [];
+
   const prompt = renderTemplate(promptTemplate, {
     agentId: agent.id,
     companyId: agent.companyId,
