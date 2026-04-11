@@ -31,12 +31,25 @@ Gateway connect identity fields:
 
 Request behavior fields:
 - payloadTemplate (object, optional): additional fields merged into gateway agent params
+- workspaceRuntime (object, optional): reserved workspace runtime metadata; workspace runtime services are manually controlled from the workspace UI and are not auto-started by heartbeats
 - timeoutSec (number, optional): adapter timeout in seconds (default 120)
 - waitTimeoutMs (number, optional): agent.wait timeout override (default timeoutSec * 1000)
 - autoPairOnFirstConnect (boolean, optional): on first "pairing required", attempt device.pair.list/device.pair.approve via shared auth, then retry once (default true)
 - paperclipApiUrl (string, optional): absolute Paperclip base URL advertised in wake text
+- claimedApiKeyPath (string, optional): path to the claimed API key JSON file read by the agent at wake time (default ~/.openclaw/workspace/paperclip-claimed-api-key.json)
 
 Session routing fields:
 - sessionKeyStrategy (string, optional): issue (default), fixed, or run
 - sessionKey (string, optional): fixed session key when strategy=fixed (default paperclip)
+
+Standard outbound payload additions:
+- paperclip (object): standardized Paperclip context added to every gateway agent request
+- paperclip.workspace (object, optional): resolved execution workspace for this run
+- paperclip.workspaces (array, optional): additional workspace hints Paperclip exposed to the run
+- paperclip.workspaceRuntime (object, optional): reserved workspace runtime metadata when explicitly supplied outside normal heartbeat execution
+
+Standard result metadata supported:
+- meta.runtimeServices (array, optional): normalized adapter-managed runtime service reports
+- meta.previewUrl (string, optional): shorthand single preview URL
+- meta.previewUrls (string[], optional): shorthand multiple preview URLs
 `;

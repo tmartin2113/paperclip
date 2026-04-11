@@ -1,17 +1,20 @@
 import { createHash, randomBytes } from "node:crypto";
-import { and, desc, eq, inArray, ne } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lt, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
-  agentManagers,
   agentConfigRevisions,
   agentApiKeys,
   agentRuntimeState,
   agentTaskSessions,
   agentWakeupRequests,
   activityLog,
+  costEvents,
   heartbeatRunEvents,
   heartbeatRuns,
+  issueExecutionDecisions,
+  issues,
+  issueComments,
 } from "@paperclipai/db";
 import { isUuidLike, normalizeAgentUrlKey } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
@@ -30,6 +33,7 @@ const CONFIG_REVISION_FIELDS = [
   "name",
   "role",
   "title",
+  "reportsTo",
   "capabilities",
   "adapterType",
   "adapterConfig",
@@ -89,6 +93,7 @@ function buildConfigSnapshot(
     name: row.name,
     role: row.role,
     title: row.title,
+    reportsTo: row.reportsTo,
     capabilities: row.capabilities,
     adapterType: row.adapterType,
     adapterConfig,
@@ -136,6 +141,8 @@ function configPatchFromSnapshot(snapshot: unknown): Partial<typeof agents.$infe
     name: snapshot.name,
     role: snapshot.role,
     title: typeof snapshot.title === "string" || snapshot.title === null ? snapshot.title : null,
+    reportsTo:
+      typeof snapshot.reportsTo === "string" || snapshot.reportsTo === null ? snapshot.reportsTo : null,
     capabilities:
       typeof snapshot.capabilities === "string" || snapshot.capabilities === null
         ? snapshot.capabilities
@@ -180,6 +187,15 @@ export function deduplicateAgentName(
 }
 
 export function agentService(db: Db) {
+  function currentUtcMonthWindow(now = new Date()) {
+    const year = now.getUTCFullYear();
+    const month = now.getUTCMonth();
+    return {
+      start: new Date(Date.UTC(year, month, 1, 0, 0, 0, 0)),
+      end: new Date(Date.UTC(year, month + 1, 1, 0, 0, 0, 0)),
+    };
+  }
+
   function withUrlKey<T extends { id: string; name: string }>(row: T) {
     return {
       ...row,
@@ -187,20 +203,43 @@ export function agentService(db: Db) {
     };
   }
 
-  async function fetchManagerIds(agentId: string): Promise<string[]> {
-    const rows = await db
-      .select({ managerId: agentManagers.managerId })
-      .from(agentManagers)
-      .where(eq(agentManagers.agentId, agentId));
-    return rows.map((r) => r.managerId);
-  }
-
-  function normalizeAgentRow(row: typeof agents.$inferSelect, managerIds: string[] = []) {
+  function normalizeAgentRow(row: typeof agents.$inferSelect) {
     return withUrlKey({
       ...row,
-      managerIds,
       permissions: normalizeAgentPermissions(row.permissions, row.role),
     });
+  }
+
+  async function getMonthlySpendByAgentIds(companyId: string, agentIds: string[]) {
+    if (agentIds.length === 0) return new Map<string, number>();
+    const { start, end } = currentUtcMonthWindow();
+    const rows = await db
+      .select({
+        agentId: costEvents.agentId,
+        spentMonthlyCents: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::int`,
+      })
+      .from(costEvents)
+      .where(
+        and(
+          eq(costEvents.companyId, companyId),
+          inArray(costEvents.agentId, agentIds),
+          gte(costEvents.occurredAt, start),
+          lt(costEvents.occurredAt, end),
+        ),
+      )
+      .groupBy(costEvents.agentId);
+    return new Map(rows.map((row) => [row.agentId, Number(row.spentMonthlyCents ?? 0)]));
+  }
+
+  async function hydrateAgentSpend<T extends { id: string; companyId: string; spentMonthlyCents: number }>(rows: T[]) {
+    const agentIds = rows.map((row) => row.id);
+    const companyId = rows[0]?.companyId;
+    if (!companyId || agentIds.length === 0) return rows;
+    const spendByAgentId = await getMonthlySpendByAgentIds(companyId, agentIds);
+    return rows.map((row) => ({
+      ...row,
+      spentMonthlyCents: spendByAgentId.get(row.id) ?? 0,
+    }));
   }
 
   async function getById(id: string) {
@@ -210,8 +249,8 @@ export function agentService(db: Db) {
       .where(eq(agents.id, id))
       .then((rows) => rows[0] ?? null);
     if (!row) return null;
-    const managerIds = await fetchManagerIds(id);
-    return normalizeAgentRow(row, managerIds);
+    const [hydrated] = await hydrateAgentSpend([row]);
+    return normalizeAgentRow(hydrated);
   }
 
   async function ensureManager(companyId: string, managerId: string) {
@@ -223,20 +262,15 @@ export function agentService(db: Db) {
     return manager;
   }
 
-  async function assertNoCycle(agentId: string, managerIds: string[]) {
-    if (managerIds.length === 0) return;
-    if (managerIds.includes(agentId)) throw unprocessable("Agent cannot report to itself");
+  async function assertNoCycle(agentId: string, reportsTo: string | null | undefined) {
+    if (!reportsTo) return;
+    if (reportsTo === agentId) throw unprocessable("Agent cannot report to itself");
 
-    // BFS upward through DAG
-    const visited = new Set<string>();
-    const queue = [...managerIds];
-    while (queue.length > 0) {
-      const cursor = queue.shift()!;
+    let cursor: string | null = reportsTo;
+    while (cursor) {
       if (cursor === agentId) throw unprocessable("Reporting relationship would create cycle");
-      if (visited.has(cursor)) continue;
-      visited.add(cursor);
-      const parentIds = await fetchManagerIds(cursor);
-      queue.push(...parentIds);
+      const next = await getById(cursor);
+      cursor = next?.reportsTo ?? null;
     }
   }
 
@@ -285,12 +319,11 @@ export function agentService(db: Db) {
       throw conflict("Pending approval agents cannot be activated directly");
     }
 
-    const incomingManagerIds = (data as Record<string, unknown>).managerIds as string[] | undefined;
-    if (incomingManagerIds !== undefined) {
-      for (const mid of incomingManagerIds) {
-        await ensureManager(existing.companyId, mid);
+    if (data.reportsTo !== undefined) {
+      if (data.reportsTo) {
+        await ensureManager(existing.companyId, data.reportsTo);
       }
-      await assertNoCycle(id, incomingManagerIds);
+      await assertNoCycle(id, data.reportsTo);
     }
 
     if (data.name !== undefined) {
@@ -301,8 +334,7 @@ export function agentService(db: Db) {
       }
     }
 
-    const { managerIds: _managerIds, ...restData } = data as Partial<typeof agents.$inferInsert> & { managerIds?: string[] };
-    const normalizedPatch = { ...restData } as Partial<typeof agents.$inferInsert>;
+    const normalizedPatch = { ...data } as Partial<typeof agents.$inferInsert>;
     if (data.permissions !== undefined) {
       const role = (data.role ?? existing.role) as string;
       normalizedPatch.permissions = normalizeAgentPermissions(data.permissions, role);
@@ -311,31 +343,13 @@ export function agentService(db: Db) {
     const shouldRecordRevision = Boolean(options?.recordRevision) && hasConfigPatchFields(normalizedPatch);
     const beforeConfig = shouldRecordRevision ? buildConfigSnapshot(existing) : null;
 
-    const { updated, resolvedManagerIds } = await db.transaction(async (tx) => {
-      const row = await tx
-        .update(agents)
-        .set({ ...normalizedPatch, updatedAt: new Date() })
-        .where(eq(agents.id, id))
-        .returning()
-        .then((rows) => rows[0] ?? null);
-
-      // Sync junction table when managerIds provided
-      let mIds: string[];
-      if (incomingManagerIds !== undefined) {
-        await tx.delete(agentManagers).where(eq(agentManagers.agentId, id));
-        if (incomingManagerIds.length > 0) {
-          await tx.insert(agentManagers).values(
-            incomingManagerIds.map((mid) => ({ agentId: id, managerId: mid })),
-          );
-        }
-        mIds = incomingManagerIds;
-      } else {
-        mIds = await fetchManagerIds(id);
-      }
-      return { updated: row, resolvedManagerIds: mIds };
-    });
-
-    const normalizedUpdated = updated ? normalizeAgentRow(updated, resolvedManagerIds) : null;
+    const updated = await db
+      .update(agents)
+      .set({ ...normalizedPatch, updatedAt: new Date() })
+      .where(eq(agents.id, id))
+      .returning()
+      .then((rows) => rows[0] ?? null);
+    const normalizedUpdated = updated ? normalizeAgentRow(updated) : null;
 
     if (normalizedUpdated && shouldRecordRevision && beforeConfig) {
       const afterConfig = buildConfigSnapshot(normalizedUpdated);
@@ -365,71 +379,53 @@ export function agentService(db: Db) {
         conditions.push(ne(agents.status, "terminated"));
       }
       const rows = await db.select().from(agents).where(and(...conditions));
-      const agentIds = rows.map((r) => r.id);
-      const managerRows = agentIds.length > 0
-        ? await db.select().from(agentManagers).where(inArray(agentManagers.agentId, agentIds))
-        : [];
-      const managerMap = new Map<string, string[]>();
-      for (const mr of managerRows) {
-        const list = managerMap.get(mr.agentId) ?? [];
-        list.push(mr.managerId);
-        managerMap.set(mr.agentId, list);
-      }
-      return rows.map((row) => normalizeAgentRow(row, managerMap.get(row.id) ?? []));
+      const hydrated = await hydrateAgentSpend(rows);
+      return hydrated.map(normalizeAgentRow);
     },
 
     getById,
 
-    create: async (companyId: string, data: Omit<typeof agents.$inferInsert, "companyId"> & { managerIds?: string[] }) => {
-      const { managerIds: inputManagerIds, ...agentData } = data;
-      const managerIds = inputManagerIds ?? [];
-
-      for (const mid of managerIds) {
-        await ensureManager(companyId, mid);
+    create: async (companyId: string, data: Omit<typeof agents.$inferInsert, "companyId">) => {
+      if (data.reportsTo) {
+        await ensureManager(companyId, data.reportsTo);
       }
 
       const existingAgents = await db
         .select({ id: agents.id, name: agents.name, status: agents.status })
         .from(agents)
         .where(eq(agents.companyId, companyId));
-      const uniqueName = deduplicateAgentName(agentData.name, existingAgents);
+      const uniqueName = deduplicateAgentName(data.name, existingAgents);
 
-      const role = agentData.role ?? "general";
-      const normalizedPermissions = normalizeAgentPermissions(agentData.permissions, role);
-      const created = await db.transaction(async (tx) => {
-        const row = await tx
-          .insert(agents)
-          .values({ ...agentData, name: uniqueName, companyId, role, permissions: normalizedPermissions })
-          .returning()
-          .then((rows) => rows[0]);
+      const role = data.role ?? "general";
+      const normalizedPermissions = normalizeAgentPermissions(data.permissions, role);
+      const created = await db
+        .insert(agents)
+        .values({ ...data, name: uniqueName, companyId, role, permissions: normalizedPermissions })
+        .returning()
+        .then((rows) => rows[0]);
 
-        if (managerIds.length > 0) {
-          await tx.insert(agentManagers).values(
-            managerIds.map((mid) => ({ agentId: row.id, managerId: mid })),
-          );
-        }
-        return row;
-      });
-
-      return normalizeAgentRow(created, managerIds);
+      return normalizeAgentRow(created);
     },
 
     update: updateAgent,
 
-    pause: async (id: string) => {
+    pause: async (id: string, reason: "manual" | "budget" | "system" = "manual") => {
       const existing = await getById(id);
       if (!existing) return null;
       if (existing.status === "terminated") throw conflict("Cannot pause terminated agent");
 
       const updated = await db
         .update(agents)
-        .set({ status: "paused", updatedAt: new Date() })
+        .set({
+          status: "paused",
+          pauseReason: reason,
+          pausedAt: new Date(),
+          updatedAt: new Date(),
+        })
         .where(eq(agents.id, id))
         .returning()
         .then((rows) => rows[0] ?? null);
-      if (!updated) return null;
-      const mIds = await fetchManagerIds(id);
-      return normalizeAgentRow(updated, mIds);
+      return updated ? normalizeAgentRow(updated) : null;
     },
 
     resume: async (id: string) => {
@@ -442,13 +438,16 @@ export function agentService(db: Db) {
 
       const updated = await db
         .update(agents)
-        .set({ status: "idle", updatedAt: new Date() })
+        .set({
+          status: "idle",
+          pauseReason: null,
+          pausedAt: null,
+          updatedAt: new Date(),
+        })
         .where(eq(agents.id, id))
         .returning()
         .then((rows) => rows[0] ?? null);
-      if (!updated) return null;
-      const mIds = await fetchManagerIds(id);
-      return normalizeAgentRow(updated, mIds);
+      return updated ? normalizeAgentRow(updated) : null;
     },
 
     terminate: async (id: string) => {
@@ -457,7 +456,12 @@ export function agentService(db: Db) {
 
       await db
         .update(agents)
-        .set({ status: "terminated", updatedAt: new Date() })
+        .set({
+          status: "terminated",
+          pauseReason: null,
+          pausedAt: null,
+          updatedAt: new Date(),
+        })
         .where(eq(agents.id, id));
 
       await db
@@ -473,13 +477,21 @@ export function agentService(db: Db) {
       if (!existing) return null;
 
       return db.transaction(async (tx) => {
-        // Junction table rows cascade-delete, but explicit delete for safety
-        await tx.delete(agentManagers).where(eq(agentManagers.agentId, id));
-        await tx.delete(agentManagers).where(eq(agentManagers.managerId, id));
-        // Nullify activity_log FK references before deleting heartbeat_runs
-        await tx.update(activityLog).set({ runId: null }).where(eq(activityLog.agentId, id));
+        await tx.update(agents).set({ reportsTo: null }).where(eq(agents.reportsTo, id));
+        await tx
+          .update(issues)
+          .set({ assigneeAgentId: null, createdByAgentId: null })
+          .where(or(eq(issues.assigneeAgentId, id), eq(issues.createdByAgentId, id)));
         await tx.delete(heartbeatRunEvents).where(eq(heartbeatRunEvents.agentId, id));
         await tx.delete(agentTaskSessions).where(eq(agentTaskSessions.agentId, id));
+        await tx.delete(activityLog).where(
+          or(
+            eq(activityLog.agentId, id),
+            sql`${activityLog.runId} in (select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.agentId} = ${id})`,
+          ),
+        );
+        await tx.delete(issueExecutionDecisions).where(eq(issueExecutionDecisions.actorAgentId, id));
+        await tx.delete(issueComments).where(eq(issueComments.authorAgentId, id));
         await tx.delete(heartbeatRuns).where(eq(heartbeatRuns.agentId, id));
         await tx.delete(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, id));
         await tx.delete(agentApiKeys).where(eq(agentApiKeys.agentId, id));
@@ -504,9 +516,8 @@ export function agentService(db: Db) {
         .where(eq(agents.id, id))
         .returning()
         .then((rows) => rows[0] ?? null);
-      if (!updated) return null;
-      const mIds = await fetchManagerIds(id);
-      return normalizeAgentRow(updated, mIds);
+
+      return updated ? normalizeAgentRow(updated) : null;
     },
 
     updatePermissions: async (id: string, permissions: { canCreateAgents: boolean }) => {
@@ -522,9 +533,8 @@ export function agentService(db: Db) {
         .where(eq(agents.id, id))
         .returning()
         .then((rows) => rows[0] ?? null);
-      if (!updated) return null;
-      const mIds = await fetchManagerIds(id);
-      return normalizeAgentRow(updated, mIds);
+
+      return updated ? normalizeAgentRow(updated) : null;
     },
 
     listConfigRevisions: async (id: string) =>
@@ -623,22 +633,10 @@ export function agentService(db: Db) {
         .select()
         .from(agents)
         .where(and(eq(agents.companyId, companyId), ne(agents.status, "terminated")));
-      const agentIds = rows.map((r) => r.id);
-      const mgrRows = agentIds.length > 0
-        ? await db.select().from(agentManagers).where(inArray(agentManagers.agentId, agentIds))
-        : [];
-      const managerMap = new Map<string, string[]>();
-      for (const mr of mgrRows) {
-        const list = managerMap.get(mr.agentId) ?? [];
-        list.push(mr.managerId);
-        managerMap.set(mr.agentId, list);
-      }
-      const normalizedRows = rows.map((row) => normalizeAgentRow(row, managerMap.get(row.id) ?? []));
-
-      // Build tree using first manager as primary parent
+      const normalizedRows = rows.map(normalizeAgentRow);
       const byManager = new Map<string | null, typeof normalizedRows>();
       for (const row of normalizedRows) {
-        const key = row.managerIds[0] ?? null;
+        const key = row.reportsTo ?? null;
         const group = byManager.get(key) ?? [];
         group.push(row);
         byManager.set(key, group);
@@ -659,16 +657,13 @@ export function agentService(db: Db) {
       const chain: { id: string; name: string; role: string; title: string | null }[] = [];
       const visited = new Set<string>([agentId]);
       const start = await getById(agentId);
-      if (!start) return chain;
-      const queue = [...start.managerIds];
-      while (queue.length > 0 && chain.length < 50) {
-        const currentId = queue.shift()!;
-        if (visited.has(currentId)) continue;
+      let currentId = start?.reportsTo ?? null;
+      while (currentId && !visited.has(currentId) && chain.length < 50) {
         visited.add(currentId);
         const mgr = await getById(currentId);
-        if (!mgr) continue;
+        if (!mgr) break;
         chain.push({ id: mgr.id, name: mgr.name, role: mgr.role, title: mgr.title ?? null });
-        queue.push(...mgr.managerIds);
+        currentId = mgr.reportsTo ?? null;
       }
       return chain;
     },
@@ -700,12 +695,10 @@ export function agentService(db: Db) {
 
       const rows = await db.select().from(agents).where(eq(agents.companyId, companyId));
       const matches = rows
-        .map((row) => normalizeAgentRow(row))
+        .map(normalizeAgentRow)
         .filter((agent) => agent.urlKey === urlKey && agent.status !== "terminated");
       if (matches.length === 1) {
-        const match = matches[0]!;
-        const mIds = await fetchManagerIds(match.id);
-        return { agent: { ...match, managerIds: mIds }, ambiguous: false } as const;
+        return { agent: matches[0] ?? null, ambiguous: false } as const;
       }
       if (matches.length > 1) {
         return { agent: null, ambiguous: true } as const;

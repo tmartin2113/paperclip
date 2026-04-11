@@ -2,7 +2,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createServer } from "node:http";
 import { WebSocketServer } from "ws";
 import { execute, testEnvironment } from "@paperclipai/adapter-openclaw-gateway/server";
-import { parseOpenClawGatewayStdoutLine } from "@paperclipai/adapter-openclaw-gateway/ui";
+import {
+  buildOpenClawGatewayConfig,
+  parseOpenClawGatewayStdoutLine,
+} from "@paperclipai/adapter-openclaw-gateway/ui";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 
 function buildContext(
@@ -36,7 +39,9 @@ function buildContext(
   };
 }
 
-async function createMockGatewayServer() {
+async function createMockGatewayServer(options?: {
+  waitPayload?: Record<string, unknown>;
+}) {
   const server = createServer();
   const wss = new WebSocketServer({ server });
 
@@ -136,7 +141,7 @@ async function createMockGatewayServer() {
             type: "res",
             id: frame.id,
             ok: true,
-            payload: {
+            payload: options?.waitPayload ?? {
               runId: frame.params?.runId,
               status: "ok",
               startedAt: 1,
@@ -412,6 +417,66 @@ describe("openclaw gateway adapter execute", () => {
             onLog: async (_stream, chunk) => {
               logs.push(chunk);
             },
+            context: {
+              taskId: "task-123",
+              issueId: "issue-123",
+              wakeReason: "issue_assigned",
+              issueIds: ["issue-123"],
+              paperclipWorkspace: {
+                cwd: "/tmp/worktrees/pap-123",
+                strategy: "git_worktree",
+                branchName: "pap-123-test",
+              },
+              paperclipWorkspaces: [
+                {
+                  id: "workspace-1",
+                  cwd: "/tmp/project",
+                },
+              ],
+              paperclipRuntimeServiceIntents: [
+                {
+                  name: "preview",
+                  lifecycle: "ephemeral",
+                },
+              ],
+              paperclipWake: {
+                reason: "issue_commented",
+                issue: {
+                  id: "issue-123",
+                  identifier: "PAP-874",
+                  title: "chat-speed issues",
+                  status: "in_progress",
+                  priority: "medium",
+                },
+                commentIds: ["comment-1", "comment-2"],
+                latestCommentId: "comment-2",
+                comments: [
+                  {
+                    id: "comment-1",
+                    issueId: "issue-123",
+                    body: "First comment",
+                    bodyTruncated: false,
+                    createdAt: "2026-03-28T14:35:00.000Z",
+                    author: { type: "user", id: "user-1" },
+                  },
+                  {
+                    id: "comment-2",
+                    issueId: "issue-123",
+                    body: "Second comment",
+                    bodyTruncated: false,
+                    createdAt: "2026-03-28T14:35:10.000Z",
+                    author: { type: "user", id: "user-1" },
+                  },
+                ],
+                commentWindow: {
+                  requestedCount: 2,
+                  includedCount: 2,
+                  missingCount: 0,
+                },
+                truncated: false,
+                fallbackFetchNeeded: false,
+              },
+            },
           },
         ),
       );
@@ -428,6 +493,21 @@ describe("openclaw gateway adapter execute", () => {
       expect(String(payload?.message ?? "")).toContain("wake now");
       expect(String(payload?.message ?? "")).toContain("PAPERCLIP_RUN_ID=run-123");
       expect(String(payload?.message ?? "")).toContain("PAPERCLIP_TASK_ID=task-123");
+      expect(String(payload?.message ?? "")).toContain("## Paperclip Wake Payload");
+      expect(String(payload?.message ?? "")).toContain(
+        "Treat this wake payload as the highest-priority change for the current heartbeat.",
+      );
+      expect(String(payload?.message ?? "")).toContain(
+        "Do not switch to another issue until you have handled this wake.",
+      );
+      expect(String(payload?.message ?? "")).toContain("First comment");
+      expect(String(payload?.message ?? "")).toContain("\"commentIds\":[\"comment-1\",\"comment-2\"]");
+      expect(payload?.paperclip).toMatchObject({
+        wake: {
+          latestCommentId: "comment-2",
+          commentIds: ["comment-1", "comment-2"],
+        },
+      });
 
       expect(logs.some((entry) => entry.includes("[openclaw-gateway:event] run=run-123 stream=assistant"))).toBe(true);
     } finally {
@@ -439,6 +519,54 @@ describe("openclaw gateway adapter execute", () => {
     const result = await execute(buildContext({}));
     expect(result.exitCode).toBe(1);
     expect(result.errorCode).toBe("openclaw_gateway_url_missing");
+  });
+
+  it("returns adapter-managed runtime services from gateway result meta", async () => {
+    const gateway = await createMockGatewayServer({
+      waitPayload: {
+        runId: "run-123",
+        status: "ok",
+        startedAt: 1,
+        endedAt: 2,
+        meta: {
+          runtimeServices: [
+            {
+              name: "preview",
+              scopeType: "run",
+              url: "https://preview.example/run-123",
+              providerRef: "sandbox-123",
+              lifecycle: "ephemeral",
+            },
+          ],
+        },
+      },
+    });
+
+    try {
+      const result = await execute(
+        buildContext({
+          url: gateway.url,
+          headers: {
+            "x-openclaw-token": "gateway-token",
+          },
+          waitTimeoutMs: 2000,
+        }),
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(result.runtimeServices).toEqual([
+        expect.objectContaining({
+          serviceName: "preview",
+          scopeType: "run",
+          url: "https://preview.example/run-123",
+          providerRef: "sandbox-123",
+          lifecycle: "ephemeral",
+          status: "running",
+        }),
+      ]);
+    } finally {
+      await gateway.close();
+    }
   });
 
   it("auto-approves pairing once and retries the run", async () => {
@@ -476,6 +604,62 @@ describe("openclaw gateway adapter execute", () => {
     } finally {
       await gateway.close();
     }
+  });
+});
+
+describe("openclaw gateway ui build config", () => {
+  it("parses payload template and runtime services json", () => {
+    const config = buildOpenClawGatewayConfig({
+      adapterType: "openclaw_gateway",
+      cwd: "",
+      promptTemplate: "",
+      model: "",
+      thinkingEffort: "",
+      chrome: false,
+      dangerouslySkipPermissions: false,
+      search: false,
+      dangerouslyBypassSandbox: false,
+      command: "",
+      args: "",
+      extraArgs: "",
+      envVars: "",
+      envBindings: {},
+      url: "wss://gateway.example/ws",
+      payloadTemplateJson: JSON.stringify({
+        agentId: "remote-agent-123",
+        metadata: { team: "platform" },
+      }),
+      runtimeServicesJson: JSON.stringify({
+        services: [
+          {
+            name: "preview",
+            lifecycle: "shared",
+          },
+        ],
+      }),
+      bootstrapPrompt: "",
+      maxTurnsPerRun: 0,
+      heartbeatEnabled: true,
+      intervalSec: 300,
+    });
+
+    expect(config).toEqual(
+      expect.objectContaining({
+        url: "wss://gateway.example/ws",
+        payloadTemplate: {
+          agentId: "remote-agent-123",
+          metadata: { team: "platform" },
+        },
+        workspaceRuntime: {
+          services: [
+            {
+              name: "preview",
+              lifecycle: "shared",
+            },
+          ],
+        },
+      }),
+    );
   });
 });
 

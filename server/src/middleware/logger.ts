@@ -21,13 +21,14 @@ fs.mkdirSync(logDir, { recursive: true });
 const logFile = path.join(logDir, "server.log");
 
 const sharedOpts = {
-  translateTime: "HH:MM:ss",
+  translateTime: "SYS:HH:MM:ss",
   ignore: "pid,hostname",
+  singleLine: true,
 };
 
 export const logger = pino({
   level: "debug",
-  redact: ["req.headers.authorization", "req.headers[\"authorization\"]"],
+  redact: ["req.headers.authorization"],
 }, pino.transport({
   targets: [
     {
@@ -36,12 +37,8 @@ export const logger = pino({
       level: "info",
     },
     {
-      target: "pino-roll",
-      options: {
-        file: logFile,
-        size: "10m",
-        limit: { count: 5 },
-      },
+      target: "pino-pretty",
+      options: { ...sharedOpts, colorize: false, destination: logFile, mkdir: true },
       level: "debug",
     },
   ],
