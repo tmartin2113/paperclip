@@ -6,6 +6,10 @@ import {
   DraftInput,
   help,
 } from "../../components/agent-config-primitives";
+import {
+  PayloadTemplateJsonField,
+  RuntimeServicesJsonField,
+} from "../runtime-json-fields";
 
 const inputClass =
   "w-full rounded-md border border-border px-2.5 py-1.5 bg-transparent outline-none text-sm font-mono placeholder:text-muted-foreground/40";
@@ -112,6 +116,22 @@ export function OpenClawGatewayConfigFields({
         />
       </Field>
 
+      <PayloadTemplateJsonField
+        isCreate={isCreate}
+        values={values}
+        set={set}
+        config={config}
+        mark={mark}
+      />
+
+      <RuntimeServicesJsonField
+        isCreate={isCreate}
+        values={values}
+        set={set}
+        config={config}
+        mark={mark}
+      />
+
       {!isCreate && (
         <>
           <Field label="Paperclip API URL override">
@@ -127,6 +147,16 @@ export function OpenClawGatewayConfigFields({
               immediate
               className={inputClass}
               placeholder="https://paperclip.example"
+            />
+          </Field>
+
+          <Field label="Claimed API key path">
+            <DraftInput
+              value={eff("adapterConfig", "claimedApiKeyPath", String(config.claimedApiKeyPath ?? ""))}
+              onCommit={(v) => mark("adapterConfig", "claimedApiKeyPath", v || undefined)}
+              immediate
+              className={inputClass}
+              placeholder="~/.openclaw/workspace/paperclip-claimed-api-key.json"
             />
           </Field>
 
