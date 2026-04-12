@@ -14,18 +14,15 @@ import type { Db } from "@paperclipai/db";
 import {
   agentApiKeys,
   authUsers,
-  companies,
   invites,
   joinRequests
 } from "@paperclipai/db";
 import {
   acceptInviteSchema,
-  createCliAuthChallengeSchema,
   claimJoinRequestApiKeySchema,
   createCompanyInviteSchema,
   createOpenClawInvitePromptSchema,
   listJoinRequestsQuerySchema,
-  resolveCliAuthChallengeSchema,
   updateMemberPermissionsSchema,
   updateUserCompanyAccessSchema,
   PERMISSION_KEYS
@@ -43,7 +40,6 @@ import { validate } from "../middleware/validate.js";
 import {
   accessService,
   agentService,
-  boardAuthService,
   deduplicateAgentName,
   logActivity,
   notifyHireApproved
@@ -99,18 +95,9 @@ function requestBaseUrl(req: Request) {
   return `${proto}://${host}`;
 }
 
-function buildCliAuthApprovalPath(challengeId: string, token: string) {
-  return `/cli-auth/${challengeId}?token=${encodeURIComponent(token)}`;
-}
-
 function readSkillMarkdown(skillName: string): string | null {
   const normalized = skillName.trim().toLowerCase();
-  if (
-    normalized !== "paperclip" &&
-    normalized !== "paperclip-create-agent" &&
-    normalized !== "paperclip-create-plugin" &&
-    normalized !== "para-memory-files"
-  )
+  if (normalized !== "paperclip" && normalized !== "paperclip-create-agent")
     return null;
   const moduleDir = path.dirname(fileURLToPath(import.meta.url));
   const candidates = [
@@ -126,90 +113,6 @@ function readSkillMarkdown(skillName: string): string | null {
     }
   }
   return null;
-}
-
-/** Resolve the Paperclip repo skills directory (built-in / managed skills). */
-function resolvePaperclipSkillsDir(): string | null {
-  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-  const candidates = [
-    path.resolve(moduleDir, "../../skills"),         // published
-    path.resolve(process.cwd(), "skills"),           // cwd (monorepo root)
-    path.resolve(moduleDir, "../../../skills"),       // dev
-  ];
-  for (const candidate of candidates) {
-    try {
-      if (fs.statSync(candidate).isDirectory()) return candidate;
-    } catch { /* skip */ }
-  }
-  return null;
-}
-
-/** Parse YAML frontmatter from a SKILL.md file to extract the description. */
-function parseSkillFrontmatter(markdown: string): { description: string } {
-  const match = markdown.match(/^---\n([\s\S]*?)\n---/);
-  if (!match) return { description: "" };
-  const yaml = match[1];
-  // Extract description — handles both single-line and multi-line YAML values
-  const descMatch = yaml.match(
-    /^description:\s*(?:>\s*\n((?:\s{2,}[^\n]*\n?)+)|[|]\s*\n((?:\s{2,}[^\n]*\n?)+)|["']?(.*?)["']?\s*$)/m
-  );
-  if (!descMatch) return { description: "" };
-  const raw = descMatch[1] ?? descMatch[2] ?? descMatch[3] ?? "";
-  return {
-    description: raw
-      .split("\n")
-      .map((l: string) => l.trim())
-      .filter(Boolean)
-      .join(" ")
-      .trim(),
-  };
-}
-
-interface AvailableSkill {
-  name: string;
-  description: string;
-  isPaperclipManaged: boolean;
-}
-
-/** Discover all available Claude Code skills from ~/.claude/skills/. */
-function listAvailableSkills(): AvailableSkill[] {
-  const homeDir = process.env.HOME || process.env.USERPROFILE || "";
-  const claudeSkillsDir = path.join(homeDir, ".claude", "skills");
-  const paperclipSkillsDir = resolvePaperclipSkillsDir();
-
-  // Build set of Paperclip-managed skill names
-  const paperclipSkillNames = new Set<string>();
-  if (paperclipSkillsDir) {
-    try {
-      for (const entry of fs.readdirSync(paperclipSkillsDir, { withFileTypes: true })) {
-        if (entry.isDirectory()) paperclipSkillNames.add(entry.name);
-      }
-    } catch { /* skip */ }
-  }
-
-  const skills: AvailableSkill[] = [];
-
-  try {
-    const entries = fs.readdirSync(claudeSkillsDir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
-      if (entry.name.startsWith(".")) continue;
-      const skillMdPath = path.join(claudeSkillsDir, entry.name, "SKILL.md");
-      let description = "";
-      try {
-        const md = fs.readFileSync(skillMdPath, "utf8");
-        description = parseSkillFrontmatter(md).description;
-      } catch { /* no SKILL.md or unreadable */ }
-      skills.push({
-        name: entry.name,
-        description,
-        isPaperclipManaged: paperclipSkillNames.has(entry.name),
-      });
-    }
-  } catch { /* ~/.claude/skills/ doesn't exist */ }
-
-  skills.sort((a, b) => a.name.localeCompare(b.name));
-  return skills;
 }
 
 function toJoinRequestResponse(row: typeof joinRequests.$inferSelect) {
@@ -857,8 +760,7 @@ export function normalizeAgentDefaultsForJoin(input: {
 function toInviteSummaryResponse(
   req: Request,
   token: string,
-  invite: typeof invites.$inferSelect,
-  companyName: string | null = null
+  invite: typeof invites.$inferSelect
 ) {
   const baseUrl = requestBaseUrl(req);
   const onboardingPath = `/api/invites/${token}/onboarding`;
@@ -867,7 +769,6 @@ function toInviteSummaryResponse(
   return {
     id: invite.id,
     companyId: invite.companyId,
-    companyName,
     inviteType: invite.inviteType,
     allowedJoinTypes: invite.allowedJoinTypes,
     expiresAt: invite.expiresAt,
@@ -928,7 +829,7 @@ function buildOnboardingDiscoveryDiagnostics(input: {
       code: "openclaw_onboarding_private_loopback_bind",
       level: "warn",
       message: "Paperclip is bound to loopback in authenticated/private mode.",
-      hint: "Use a reachable private bind mode such as `pnpm dev --bind lan` or `pnpm dev --bind tailnet` for private-network onboarding."
+      hint: "Run with a reachable bind host or use pnpm dev --tailscale-auth for private-network onboarding."
     });
   }
 
@@ -996,7 +897,6 @@ function buildInviteOnboardingManifest(
   token: string,
   invite: typeof invites.$inferSelect,
   opts: {
-    companyName?: string | null;
     deploymentMode: DeploymentMode;
     deploymentExposure: DeploymentExposure;
     bindHost: string;
@@ -1028,12 +928,7 @@ function buildInviteOnboardingManifest(
   });
 
   return {
-    invite: toInviteSummaryResponse(
-      req,
-      token,
-      invite,
-      opts.companyName ?? null
-    ),
+    invite: toInviteSummaryResponse(req, token, invite),
     onboarding: {
       instructions:
         "Join as an OpenClaw Gateway agent, save your one-time claim secret, wait for board approval, then claim your API key. Save the claim response token to ~/.openclaw/workspace/paperclip-claimed-api-key.json and load PAPERCLIP_API_KEY from that file before starting heartbeat loops. You MUST submit adapterType='openclaw_gateway', set agentDefaultsPayload.url to your ws:// or wss:// OpenClaw gateway endpoint, and include agentDefaultsPayload.headers.x-openclaw-token (or legacy x-openclaw-auth).",
@@ -1093,7 +988,6 @@ export function buildInviteOnboardingTextDocument(
   token: string,
   invite: typeof invites.$inferSelect,
   opts: {
-    companyName?: string | null;
     deploymentMode: DeploymentMode;
     deploymentExposure: DeploymentExposure;
     bindHost: string;
@@ -1142,10 +1036,6 @@ export function buildInviteOnboardingTextDocument(
     - allowedJoinTypes: ${invite.allowedJoinTypes}
     - expiresAt: ${invite.expiresAt.toISOString()}
   `);
-
-  if (manifest.invite.companyName) {
-    lines.push(`- companyName: ${manifest.invite.companyName}`);
-  }
 
   if (onboarding.inviteMessage) {
     appendBlock(`
@@ -1425,29 +1315,10 @@ function grantsFromDefaults(
   return result;
 }
 
-export function agentJoinGrantsFromDefaults(
-  defaultsPayload: Record<string, unknown> | null | undefined
-): Array<{
-  permissionKey: (typeof PERMISSION_KEYS)[number];
-  scope: Record<string, unknown> | null;
-}> {
-  const grants = grantsFromDefaults(defaultsPayload, "agent");
-  if (grants.some((grant) => grant.permissionKey === "tasks:assign")) {
-    return grants;
-  }
-  return [
-    ...grants,
-    {
-      permissionKey: "tasks:assign",
-      scope: null
-    }
-  ];
-}
-
 type JoinRequestManagerCandidate = {
   id: string;
   role: string;
-  reportsTo: string | null;
+  managerIds: string[];
 };
 
 export function resolveJoinRequestAgentManagerId(
@@ -1458,7 +1329,7 @@ export function resolveJoinRequestAgentManagerId(
   );
   if (ceoCandidates.length === 0) return null;
   const rootCeo = ceoCandidates.find(
-    (candidate) => candidate.reportsTo === null
+    (candidate) => candidate.managerIds.length === 0
   );
   return (rootCeo ?? ceoCandidates[0] ?? null)?.id ?? null;
 }
@@ -1577,7 +1448,6 @@ export function accessRoutes(
 ) {
   const router = Router();
   const access = accessService(db);
-  const boardAuth = boardAuthService(db);
   const agents = agentService(db);
 
   async function assertInstanceAdmin(req: Request) {
@@ -1633,166 +1503,6 @@ export function accessRoutes(
     }
 
     throw conflict("Board claim challenge is no longer available");
-  });
-
-  router.post(
-    "/cli-auth/challenges",
-    validate(createCliAuthChallengeSchema),
-    async (req, res) => {
-      const created = await boardAuth.createCliAuthChallenge(req.body);
-      const approvalPath = buildCliAuthApprovalPath(
-        created.challenge.id,
-        created.challengeSecret,
-      );
-      const baseUrl = requestBaseUrl(req);
-      res.status(201).json({
-        id: created.challenge.id,
-        token: created.challengeSecret,
-        boardApiToken: created.pendingBoardToken,
-        approvalPath,
-        approvalUrl: baseUrl ? `${baseUrl}${approvalPath}` : null,
-        pollPath: `/cli-auth/challenges/${created.challenge.id}`,
-        expiresAt: created.challenge.expiresAt.toISOString(),
-        suggestedPollIntervalMs: 1000,
-      });
-    },
-  );
-
-  router.get("/cli-auth/challenges/:id", async (req, res) => {
-    const id = (req.params.id as string).trim();
-    const token =
-      typeof req.query.token === "string" ? req.query.token.trim() : "";
-    if (!id || !token) throw notFound("CLI auth challenge not found");
-    const challenge = await boardAuth.describeCliAuthChallenge(id, token);
-    if (!challenge) throw notFound("CLI auth challenge not found");
-
-    const isSignedInBoardUser =
-      req.actor.type === "board" &&
-      (req.actor.source === "session" || isLocalImplicit(req)) &&
-      Boolean(req.actor.userId);
-    const canApprove =
-      isSignedInBoardUser &&
-      (challenge.requestedAccess !== "instance_admin_required" ||
-        isLocalImplicit(req) ||
-        Boolean(req.actor.isInstanceAdmin));
-
-    res.json({
-      ...challenge,
-      requiresSignIn: !isSignedInBoardUser,
-      canApprove,
-      currentUserId: req.actor.type === "board" ? req.actor.userId ?? null : null,
-    });
-  });
-
-  router.post(
-    "/cli-auth/challenges/:id/approve",
-    validate(resolveCliAuthChallengeSchema),
-    async (req, res) => {
-      const id = (req.params.id as string).trim();
-      if (
-        req.actor.type !== "board" ||
-        (!req.actor.userId && !isLocalImplicit(req))
-      ) {
-        throw unauthorized("Sign in before approving CLI access");
-      }
-
-      const userId = req.actor.userId ?? "local-board";
-      const approved = await boardAuth.approveCliAuthChallenge(
-        id,
-        req.body.token,
-        userId,
-      );
-
-      if (approved.status === "approved") {
-        const companyIds = await boardAuth.resolveBoardActivityCompanyIds({
-          userId,
-          requestedCompanyId: approved.challenge.requestedCompanyId,
-          boardApiKeyId: approved.challenge.boardApiKeyId,
-        });
-        for (const companyId of companyIds) {
-          await logActivity(db, {
-            companyId,
-            actorType: "user",
-            actorId: userId,
-            action: "board_api_key.created",
-            entityType: "user",
-            entityId: userId,
-            details: {
-              boardApiKeyId: approved.challenge.boardApiKeyId,
-              requestedAccess: approved.challenge.requestedAccess,
-              requestedCompanyId: approved.challenge.requestedCompanyId,
-              challengeId: approved.challenge.id,
-            },
-          });
-        }
-      }
-
-      res.json({
-        approved: approved.status === "approved",
-        status: approved.status,
-        userId,
-        keyId: approved.challenge.boardApiKeyId ?? null,
-        expiresAt: approved.challenge.expiresAt.toISOString(),
-      });
-    },
-  );
-
-  router.post(
-    "/cli-auth/challenges/:id/cancel",
-    validate(resolveCliAuthChallengeSchema),
-    async (req, res) => {
-      const id = (req.params.id as string).trim();
-      const cancelled = await boardAuth.cancelCliAuthChallenge(id, req.body.token);
-      res.json({
-        status: cancelled.status,
-        cancelled: cancelled.status === "cancelled",
-      });
-    },
-  );
-
-  router.get("/cli-auth/me", async (req, res) => {
-    if (req.actor.type !== "board" || !req.actor.userId) {
-      throw unauthorized("Board authentication required");
-    }
-    const accessSnapshot = await boardAuth.resolveBoardAccess(req.actor.userId);
-    res.json({
-      user: accessSnapshot.user,
-      userId: req.actor.userId,
-      isInstanceAdmin: accessSnapshot.isInstanceAdmin,
-      companyIds: accessSnapshot.companyIds,
-      source: req.actor.source ?? "none",
-      keyId: req.actor.source === "board_key" ? req.actor.keyId ?? null : null,
-    });
-  });
-
-  router.post("/cli-auth/revoke-current", async (req, res) => {
-    if (req.actor.type !== "board" || req.actor.source !== "board_key") {
-      throw badRequest("Current board API key context is required");
-    }
-    const key = await boardAuth.assertCurrentBoardKey(
-      req.actor.keyId,
-      req.actor.userId,
-    );
-    await boardAuth.revokeBoardApiKey(key.id);
-    const companyIds = await boardAuth.resolveBoardActivityCompanyIds({
-      userId: key.userId,
-      boardApiKeyId: key.id,
-    });
-    for (const companyId of companyIds) {
-      await logActivity(db, {
-        companyId,
-        actorType: "user",
-        actorId: key.userId,
-        action: "board_api_key.revoked",
-        entityType: "user",
-        entityId: key.userId,
-        details: {
-          boardApiKeyId: key.id,
-          revokedVia: "cli_auth_logout",
-        },
-      });
-    }
-    res.json({ revoked: true, keyId: key.id });
   });
 
   async function assertCompanyPermission(
@@ -1896,28 +1606,10 @@ export function accessRoutes(
     return { token, created, normalizedAgentMessage };
   }
 
-  async function getInviteCompanyName(companyId: string | null) {
-    if (!companyId) return null;
-    const company = await db
-      .select({ name: companies.name })
-      .from(companies)
-      .where(eq(companies.id, companyId))
-      .then((rows) => rows[0] ?? null);
-    return company?.name ?? null;
-  }
-
-  router.get("/skills/available", (_req, res) => {
-    res.json({ skills: listAvailableSkills() });
-  });
-
   router.get("/skills/index", (_req, res) => {
     res.json({
       skills: [
         { name: "paperclip", path: "/api/skills/paperclip" },
-        {
-          name: "para-memory-files",
-          path: "/api/skills/para-memory-files"
-        },
         {
           name: "paperclip-create-agent",
           path: "/api/skills/paperclip-create-agent"
@@ -1966,18 +1658,11 @@ export function accessRoutes(
         }
       });
 
-      const companyName = await getInviteCompanyName(created.companyId);
-      const inviteSummary = toInviteSummaryResponse(
-        req,
-        token,
-        created,
-        companyName
-      );
+      const inviteSummary = toInviteSummaryResponse(req, token, created);
       res.status(201).json({
         ...created,
         token,
         inviteUrl: `/invite/${token}`,
-        companyName,
         onboardingTextPath: inviteSummary.onboardingTextPath,
         onboardingTextUrl: inviteSummary.onboardingTextUrl,
         inviteMessage: inviteSummary.inviteMessage
@@ -2018,18 +1703,11 @@ export function accessRoutes(
         }
       });
 
-      const companyName = await getInviteCompanyName(created.companyId);
-      const inviteSummary = toInviteSummaryResponse(
-        req,
-        token,
-        created,
-        companyName
-      );
+      const inviteSummary = toInviteSummaryResponse(req, token, created);
       res.status(201).json({
         ...created,
         token,
         inviteUrl: `/invite/${token}`,
-        companyName,
         onboardingTextPath: inviteSummary.onboardingTextPath,
         onboardingTextUrl: inviteSummary.onboardingTextUrl,
         inviteMessage: inviteSummary.inviteMessage
@@ -2054,8 +1732,7 @@ export function accessRoutes(
       throw notFound("Invite not found");
     }
 
-    const companyName = await getInviteCompanyName(invite.companyId);
-    res.json(toInviteSummaryResponse(req, token, invite, companyName));
+    res.json(toInviteSummaryResponse(req, token, invite));
   });
 
   router.get("/invites/:token/onboarding", async (req, res) => {
@@ -2070,11 +1747,7 @@ export function accessRoutes(
       throw notFound("Invite not found");
     }
 
-    const companyName = await getInviteCompanyName(invite.companyId);
-    res.json(buildInviteOnboardingManifest(req, token, invite, {
-      ...opts,
-      companyName
-    }));
+    res.json(buildInviteOnboardingManifest(req, token, invite, opts));
   });
 
   router.get("/invites/:token/onboarding.txt", async (req, res) => {
@@ -2089,15 +1762,9 @@ export function accessRoutes(
       throw notFound("Invite not found");
     }
 
-    const companyName = await getInviteCompanyName(invite.companyId);
     res
       .type("text/plain; charset=utf-8")
-      .send(
-        buildInviteOnboardingTextDocument(req, token, invite, {
-          ...opts,
-          companyName
-        })
-      );
+      .send(buildInviteOnboardingTextDocument(req, token, invite, opts));
   });
 
   router.get("/invites/:token/test-resolution", async (req, res) => {
@@ -2507,15 +2174,11 @@ export function accessRoutes(
 
       const response = toJoinRequestResponse(created);
       if (claimSecret) {
-        const companyName = await getInviteCompanyName(invite.companyId);
         const onboardingManifest = buildInviteOnboardingManifest(
           req,
           token,
           invite,
-          {
-            ...opts,
-            companyName
-          }
+          opts
         );
         res.status(202).json({
           ...response,
@@ -2667,7 +2330,7 @@ export function accessRoutes(
           role: "general",
           title: null,
           status: "idle",
-          reportsTo: managerId,
+          managerIds: [managerId],
           capabilities: existing.capabilities ?? null,
           adapterType: existing.adapterType ?? "process",
           adapterConfig:
@@ -2690,8 +2353,9 @@ export function accessRoutes(
           "member",
           "active"
         );
-        const grants = agentJoinGrantsFromDefaults(
-          invite.defaultsPayload as Record<string, unknown> | null
+        const grants = grantsFromDefaults(
+          invite.defaultsPayload as Record<string, unknown> | null,
+          "agent"
         );
         await access.setPrincipalGrants(
           companyId,
