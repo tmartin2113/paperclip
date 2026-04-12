@@ -120,7 +120,7 @@ export function approvalService(db: Db) {
             name: String(payload.name ?? "New Agent"),
             role: String(payload.role ?? "general"),
             title: typeof payload.title === "string" ? payload.title : null,
-            reportsTo: typeof payload.reportsTo === "string" ? payload.reportsTo : null,
+            managerIds: typeof payload.reportsTo === "string" ? [payload.reportsTo] : [],
             capabilities: typeof payload.capabilities === "string" ? payload.capabilities : null,
             adapterType: String(payload.adapterType ?? "process"),
             adapterConfig:
