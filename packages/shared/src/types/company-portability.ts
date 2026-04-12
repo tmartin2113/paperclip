@@ -124,6 +124,7 @@ export interface CompanyPortabilityAgentManifestEntry {
   icon: string | null;
   capabilities: string | null;
   managerSlugs: string[];
+  reportsToSlug: string | null;
   adapterType: string;
   adapterConfig: Record<string, unknown>;
   runtimeConfig: Record<string, unknown>;
