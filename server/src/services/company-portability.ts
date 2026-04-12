@@ -4157,7 +4157,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
         const managerId = importedSlugToAgentId.get(managerSlug) ?? existingSlugToAgentId.get(managerSlug) ?? null;
         if (!managerId || managerId === agentId) continue;
         try {
-          await agents.update(agentId, { managerIds: [managerId] });
+          await agents.update(agentId, { managerIds: [managerId] } as Record<string, unknown>);
         } catch {
           warnings.push(`Could not assign manager ${managerSlug} for imported agent ${manifestAgent.slug}.`);
         }
