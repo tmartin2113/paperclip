@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import type {
   AdapterExecutionContext,
   AdapterExecutionResult,
+  UsageSummary,
 } from "@paperclipai/adapter-utils";
 import {
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
@@ -100,6 +101,35 @@ function renderPaperclipEnvBlock(env: Record<string, string>): string {
   ].join("\n");
 }
 
+/**
+ * Parse an OpenAI-Responses `usage` object (input_tokens / output_tokens /
+ * input_tokens_details.cached_tokens) into Paperclip's UsageSummary. Tolerant of
+ * camelCase variants some gateways emit. Returns undefined when nothing usable.
+ */
+function parseResponsesUsage(value: unknown): UsageSummary | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const u = value as Record<string, unknown>;
+  const num = (x: unknown): number =>
+    typeof x === "number" && Number.isFinite(x) ? x : 0;
+  const inputTokens = num(u.input_tokens ?? u.inputTokens);
+  const outputTokens = num(u.output_tokens ?? u.outputTokens);
+  const inputDetails =
+    u.input_tokens_details && typeof u.input_tokens_details === "object"
+      ? (u.input_tokens_details as Record<string, unknown>)
+      : {};
+  const cachedInputTokens = num(
+    inputDetails.cached_tokens ?? u.cached_input_tokens ?? u.cachedInputTokens,
+  );
+  if (inputTokens <= 0 && outputTokens <= 0 && cachedInputTokens <= 0) {
+    return undefined;
+  }
+  return {
+    inputTokens,
+    outputTokens,
+    ...(cachedInputTokens > 0 ? { cachedInputTokens } : {}),
+  };
+}
+
 function failure(
   code: string,
   message: string,
@@ -130,6 +160,16 @@ export async function execute(
 
   const model = cfgString(ctx.config, "model");
   const timeoutSec = cfgNumber(ctx.config, "timeoutSec") ?? 120;
+
+  // Session resume: Paperclip hands back the prior run's response id via
+  // ctx.runtime (sessionParams.sessionId is the modern field, sessionId the
+  // legacy view). Sending it as previous_response_id continues that thread on
+  // the gateway instead of starting a fresh conversation.
+  const priorSessionId =
+    (typeof ctx.runtime.sessionParams?.sessionId === "string"
+      ? ctx.runtime.sessionParams.sessionId
+      : "") ||
+    (typeof ctx.runtime.sessionId === "string" ? ctx.runtime.sessionId : "");
 
   // Build the task prompt: instructions file (if any) prepended to the task text
   // carried in run context.
@@ -191,6 +231,7 @@ export async function execute(
       },
       body: JSON.stringify({
         ...(model ? { model } : {}),
+        ...(priorSessionId ? { previous_response_id: priorSessionId } : {}),
         input,
         stream: true,
         // Structured mirror of the run context; a Responses-compatible gateway
@@ -212,6 +253,11 @@ export async function execute(
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    // Step 5 — session-resume + usage telemetry, harvested from the stream: the
+    // Responses `response.*` events carry the response id (a resume handle) and,
+    // on completion, the token usage.
+    let usage: UsageSummary | undefined;
+    let sessionId: string | undefined;
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
@@ -233,11 +279,32 @@ export async function execute(
         } catch {
           continue;
         }
+        // Harvest resume handle + usage from the Responses envelope before
+        // forwarding. Later events win (response.completed carries final usage).
+        const responseObj =
+          event.response && typeof event.response === "object"
+            ? (event.response as Record<string, unknown>)
+            : null;
+        if (responseObj) {
+          if (typeof responseObj.id === "string" && responseObj.id) {
+            sessionId = responseObj.id;
+          }
+          const parsed = parseResponsesUsage(responseObj.usage);
+          if (parsed) usage = parsed;
+        }
         await forwardEvent(ctx, event);
       }
     }
 
-    return { exitCode: 0, signal: null, timedOut: false };
+    return {
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      ...(usage ? { usage, usageBasis: "per_run" as const } : {}),
+      ...(sessionId
+        ? { sessionId, sessionParams: { sessionId }, sessionDisplayId: sessionId }
+        : {}),
+    };
   } catch (err) {
     if (controller.signal.aborted) {
       return {
