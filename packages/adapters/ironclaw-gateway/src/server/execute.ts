@@ -36,6 +36,70 @@ function toBearer(token: string): string {
 }
 
 /**
+ * Parse an HTTP `Retry-After` header (delta-seconds or an HTTP-date) into an
+ * absolute ISO timestamp, so the heartbeat can defer the next wake precisely
+ * until then instead of retrying blindly. Returns null when absent/unparseable.
+ */
+function parseRetryAfter(header: string | null): string | null {
+  if (!header) return null;
+  const trimmed = header.trim();
+  if (/^\d+$/.test(trimmed)) {
+    const secs = Number(trimmed);
+    return Number.isFinite(secs) && secs >= 0
+      ? new Date(Date.now() + secs * 1000).toISOString()
+      : null;
+  }
+  const asDate = new Date(trimmed);
+  return Number.isNaN(asDate.getTime()) ? null : asDate.toISOString();
+}
+
+/**
+ * Classify a non-OK gateway HTTP response into Paperclip's error taxonomy so the
+ * heartbeat can react appropriately:
+ * - 429 (or a body that names a usage/rate/quota limit) → provider_quota, which
+ *   triggers reset-aware wake deferral (using Retry-After when given, else a
+ *   short default). Relevant when the IronClaw gateway fronts a rate-limited
+ *   upstream model.
+ * - 5xx/529 → transient_upstream, so the heartbeat retries with backoff.
+ * - anything else → no family (a genuine, non-retriable failure).
+ */
+function classifyGatewayHttpError(
+  status: number,
+  retryAfter: string | null,
+  bodyText: string,
+): {
+  errorFamily: AdapterExecutionResult["errorFamily"];
+  errorCode: string;
+  retryNotBefore: string | null;
+} {
+  const bodyIndicatesQuota =
+    /usage\s+limit|rate[\s-]?limit|\bquota\b|too\s+many\s+requests/i.test(
+      bodyText,
+    );
+  if (status === 429 || bodyIndicatesQuota) {
+    return {
+      errorFamily: "provider_quota",
+      errorCode: "ironclaw_gateway_provider_quota",
+      // Fall back to a short deferral when the gateway gives no Retry-After.
+      retryNotBefore:
+        retryAfter ?? new Date(Date.now() + 60_000).toISOString(),
+    };
+  }
+  if (status >= 500 && status <= 599) {
+    return {
+      errorFamily: "transient_upstream",
+      errorCode: `ironclaw_gateway_http_${status}`,
+      retryNotBefore: retryAfter,
+    };
+  }
+  return {
+    errorFamily: null,
+    errorCode: `ironclaw_gateway_http_${status}`,
+    retryNotBefore: null,
+  };
+}
+
+/**
  * Build the Paperclip run context the remote IronClaw agent needs to act on a
  * wake and post its work back: identity (agent/company/run), the API base URL to
  * call, and the wake specifics (which issue, why woken, the steering comment to
@@ -248,10 +312,17 @@ export async function execute(
 
     if (!res.ok || !res.body) {
       const body = await res.text().catch(() => "");
-      return failure(
-        `ironclaw_gateway_http_${res.status}`,
-        `gateway returned ${res.status}: ${body.slice(0, 500)}`,
-      );
+      const retryAfter = parseRetryAfter(res.headers.get("retry-after"));
+      const cls = classifyGatewayHttpError(res.status, retryAfter, body);
+      return {
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        errorMessage: `gateway returned ${res.status}: ${body.slice(0, 500)}`,
+        errorCode: cls.errorCode,
+        ...(cls.errorFamily ? { errorFamily: cls.errorFamily } : {}),
+        ...(cls.retryNotBefore ? { retryNotBefore: cls.retryNotBefore } : {}),
+      };
     }
 
     // Parse the SSE stream: events are separated by a blank line; each carries
@@ -321,7 +392,18 @@ export async function execute(
         errorCode: "ironclaw_gateway_timeout",
       };
     }
-    return failure("ironclaw_gateway_transport_error", String(err));
+    // A transport error (connection refused, DNS, reset) is usually transient —
+    // the gateway may be briefly unreachable (e.g. a boot-race between the
+    // container and its network). Mark it transient_upstream so the heartbeat
+    // retries with backoff rather than hard-failing the run.
+    return {
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      errorMessage: String(err),
+      errorCode: "ironclaw_gateway_transport_error",
+      errorFamily: "transient_upstream",
+    };
   } finally {
     clearTimeout(timer);
   }
