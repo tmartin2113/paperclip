@@ -6,6 +6,7 @@ import {
   LayoutDashboard,
   DollarSign,
   History,
+  Eye,
   Search,
   SquarePen,
   Network,
@@ -283,6 +284,7 @@ export function Sidebar() {
           <SidebarNavItem to="/timeline" label="Timeline" icon={GanttChartSquare} />
           <SidebarNavItem to="/costs" label="Costs" icon={DollarSign} />
           <SidebarNavItem to="/activity" label="Activity" icon={History} />
+          <SidebarNavItem to="/visibility" label="Visibility" icon={Eye} liveCount={liveRunCount} />
           <SidebarNavItem to="/company/settings" label="Settings" icon={Settings} />
         </SidebarSection>
 

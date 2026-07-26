@@ -260,3 +260,18 @@ export interface InstanceSchedulerHeartbeatAgent {
   schedulerActive: boolean;
   lastHeartbeatAt: Date | null;
 }
+
+/** Payload shape for a heartbeat.run.event whose eventType === "file.edit".
+ * Emitted by adapters that can observe agent file operations (e.g. the
+ * ironclaw_gateway adapter parsing file-tool calls from its SSE stream), and
+ * surfaced live on the Visibility page. */
+export interface FileEditEventData {
+  filePath: string;
+  editType: "create" | "modify" | "delete";
+  diff: string;
+  linesAdded: number;
+  linesRemoved: number;
+  timestamp: string;
+  repoUrl?: string;
+  branch?: string;
+}

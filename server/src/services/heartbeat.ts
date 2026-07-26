@@ -16906,6 +16906,48 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       };
     },
 
+    // Visibility page: gather "file.edit" run-events for the company's currently
+    // active runs, grouped by run (with its agent). Adapters that can observe
+    // agent file operations emit these via ctx.onEvent, which persists them as
+    // ordinary run events with eventType "file.edit".
+    listFileEventsForActiveRuns: async (companyId: string) => {
+      const activeRuns = await db
+        .select({ id: heartbeatRuns.id, agentId: heartbeatRuns.agentId })
+        .from(heartbeatRuns)
+        .where(
+          and(
+            eq(heartbeatRuns.companyId, companyId),
+            inArray(heartbeatRuns.status, ["queued", "running"]),
+          ),
+        );
+
+      if (activeRuns.length === 0) return {};
+
+      const runIds = activeRuns.map((r) => r.id);
+      const events = await db
+        .select()
+        .from(heartbeatRunEvents)
+        .where(
+          and(
+            inArray(heartbeatRunEvents.runId, runIds),
+            eq(heartbeatRunEvents.eventType, "file.edit"),
+          ),
+        )
+        .orderBy(asc(heartbeatRunEvents.seq));
+
+      const grouped: Record<string, { agentId: string; events: typeof events }> = {};
+      const agentByRun = Object.fromEntries(activeRuns.map((r) => [r.id, r.agentId]));
+
+      for (const event of events) {
+        if (!grouped[event.runId]) {
+          grouped[event.runId] = { agentId: agentByRun[event.runId]!, events: [] };
+        }
+        grouped[event.runId].events.push(event);
+      }
+
+      return grouped;
+    },
+
     listTaskSessions: async (agentId: string) => {
       const agent = await getAgent(agentId);
       if (!agent) throw notFound("Agent not found");

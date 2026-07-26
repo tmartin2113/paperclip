@@ -3599,6 +3599,26 @@ export function agentRoutes(
     res.json(result);
   });
 
+  router.get("/companies/:companyId/heartbeat-runs/active/file-events", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+
+    const result = await heartbeat.listFileEventsForActiveRuns(companyId);
+    const currentUserRedactionOptions = await getCurrentUserRedactionOptions();
+    for (const entry of Object.values(result)) {
+      entry.events = entry.events.map((event) =>
+        redactCurrentUserValue(
+          {
+            ...event,
+            payload: redactEventPayload(event.payload),
+          },
+          currentUserRedactionOptions,
+        ),
+      );
+    }
+    res.json({ runs: result });
+  });
+
   router.get("/companies/:companyId/heartbeat-runs", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
