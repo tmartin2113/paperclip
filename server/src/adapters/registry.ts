@@ -107,6 +107,14 @@ import {
   agentConfigurationDoc as openclawGatewayAgentConfigurationDoc,
   models as openclawGatewayModels,
 } from "@paperclipai/adapter-openclaw-gateway";
+import {
+  execute as ironclawGatewayExecute,
+  testEnvironment as ironclawGatewayTestEnvironment,
+} from "@paperclipai/adapter-ironclaw-gateway/server";
+import {
+  agentConfigurationDoc as ironclawGatewayAgentConfigurationDoc,
+  models as ironclawGatewayModels,
+} from "@paperclipai/adapter-ironclaw-gateway";
 import { listCodexModels, refreshCodexModels } from "./codex-models.js";
 import { listCursorModels } from "./cursor-models.js";
 import {
@@ -382,6 +390,17 @@ const openclawGatewayAdapter: ServerAdapterModule = {
   agentConfigurationDoc: openclawGatewayAgentConfigurationDoc,
 };
 
+const ironclawGatewayAdapter: ServerAdapterModule = {
+  type: "ironclaw_gateway",
+  execute: ironclawGatewayExecute,
+  testEnvironment: ironclawGatewayTestEnvironment,
+  models: ironclawGatewayModels,
+  supportsLocalAgentJwt: false,
+  supportsInstructionsBundle: false,
+  requiresMaterializedRuntimeSkills: false,
+  agentConfigurationDoc: ironclawGatewayAgentConfigurationDoc,
+};
+
 const openCodeLocalAdapter: ServerAdapterModule = {
   type: "opencode_local",
   execute: openCodeExecute,
@@ -446,6 +465,7 @@ function registerBuiltInAdapters() {
     hermesGatewayAdapter,
     hermesLocalAdapter,
     openclawGatewayAdapter,
+    ironclawGatewayAdapter,
     processAdapter,
     httpAdapter,
   ]) {
