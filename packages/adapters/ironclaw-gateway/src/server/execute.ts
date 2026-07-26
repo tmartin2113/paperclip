@@ -4,6 +4,13 @@ import type {
   AdapterExecutionContext,
   AdapterExecutionResult,
 } from "@paperclipai/adapter-utils";
+import {
+  DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
+  joinPromptSections,
+  renderPaperclipWakePrompt,
+  renderTemplate,
+  stringifyPaperclipWakePayload,
+} from "@paperclipai/adapter-utils/server-utils";
 
 function cfgString(
   config: Record<string, unknown>,
@@ -70,13 +77,25 @@ export async function execute(
       );
     }
   }
-  const task =
-    typeof ctx.context.prompt === "string"
-      ? ctx.context.prompt
-      : typeof ctx.config.promptTemplate === "string"
-        ? ctx.config.promptTemplate
-        : "";
-  const input = instructions ? `${instructions}\n\n---\n\n${task}` : task;
+  // Paperclip is issue/wake-driven: build the agent brief from the operator's
+  // prompt template + the rendered wake payload (which issue, why woken), using
+  // the shared renderers so this adapter matches every other one. There is no
+  // raw "prompt" field.
+  const templateSource =
+    cfgString(ctx.config, "promptTemplate") ??
+    DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE;
+  const renderedTemplate = renderTemplate(templateSource, { agent: ctx.agent });
+  const wakePrompt = renderPaperclipWakePrompt(ctx.context.paperclipWake, {
+    includeExecutionContract: true,
+  });
+  const wakeJson =
+    stringifyPaperclipWakePayload(ctx.context.paperclipWake, {}) ?? "";
+  const input = joinPromptSections([
+    instructions,
+    renderedTemplate,
+    wakePrompt,
+    wakeJson,
+  ]);
 
   const endpoint = `${url.replace(/\/+$/, "")}/v1/responses`;
   const extraHeaders =
