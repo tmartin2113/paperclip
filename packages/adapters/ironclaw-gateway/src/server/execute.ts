@@ -6,7 +6,9 @@ import type {
 } from "@paperclipai/adapter-utils";
 import {
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
+  buildPaperclipEnv,
   joinPromptSections,
+  normalizePaperclipWakePayload,
   renderPaperclipWakePrompt,
   renderTemplate,
   stringifyPaperclipWakePayload,
@@ -30,6 +32,72 @@ function cfgNumber(
 
 function toBearer(token: string): string {
   return /^bearer\s+/i.test(token.trim()) ? token.trim() : `Bearer ${token.trim()}`;
+}
+
+/**
+ * Build the Paperclip run context the remote IronClaw agent needs to act on a
+ * wake and post its work back: identity (agent/company/run), the API base URL to
+ * call, and the wake specifics (which issue, why woken, the steering comment to
+ * read). This is what turns SSE-out into a full steering loop — the advisor
+ * posts a comment, Paperclip wakes the agent, and these coordinates tell the
+ * remote agent where to read that comment and where to reply.
+ *
+ * PAPERCLIP_API_KEY is intentionally NOT included: the adapter never handles the
+ * agent's API credential. For a remote gateway the operator provisions the key
+ * on the IronClaw side; Paperclip supplies only the non-secret coordinates here.
+ */
+function buildPaperclipRunEnv(
+  ctx: AdapterExecutionContext,
+): Record<string, string> {
+  const env: Record<string, string> = {
+    ...buildPaperclipEnv(ctx.agent),
+    PAPERCLIP_RUN_ID: ctx.runId,
+  };
+  // Remote execution: the agent runs on a different host than the Paperclip
+  // server, so a localhost API URL won't resolve. Let the operator override with
+  // a network-reachable base (e.g. the Tailscale address of the Paperclip API).
+  const apiUrlOverride = cfgString(ctx.config, "paperclipApiUrl");
+  if (apiUrlOverride) env.PAPERCLIP_API_URL = apiUrlOverride.replace(/\/+$/, "");
+
+  const wake = normalizePaperclipWakePayload(ctx.context.paperclipWake);
+  if (wake) {
+    if (wake.reason) env.PAPERCLIP_WAKE_REASON = wake.reason;
+    if (wake.issue?.id) env.PAPERCLIP_ISSUE_ID = wake.issue.id;
+    if (wake.issue?.identifier)
+      env.PAPERCLIP_ISSUE_IDENTIFIER = wake.issue.identifier;
+    if (wake.latestCommentId)
+      env.PAPERCLIP_WAKE_COMMENT_ID = wake.latestCommentId;
+    if (wake.interactionKind)
+      env.PAPERCLIP_INTERACTION_KIND = wake.interactionKind;
+    if (wake.interactionStatus)
+      env.PAPERCLIP_INTERACTION_STATUS = wake.interactionStatus;
+    if (wake.unresolvedBlockerIssueIds.length > 0)
+      env.PAPERCLIP_BLOCKER_ISSUE_IDS =
+        wake.unresolvedBlockerIssueIds.join(",");
+  }
+  return env;
+}
+
+/**
+ * Render the run env as a delimited context block for the prompt input. The
+ * gateway also receives it as request `metadata`, but embedding it in the input
+ * guarantees the agent sees its callback coordinates even if a gateway drops
+ * unknown metadata.
+ */
+function renderPaperclipEnvBlock(env: Record<string, string>): string {
+  const lines = Object.entries(env).map(([k, v]) => `${k}=${v}`);
+  return [
+    "## Paperclip run context",
+    "",
+    "Machine-readable identifiers for this run. Use PAPERCLIP_API_URL as the",
+    "Paperclip API base, authenticating with your provisioned PAPERCLIP_API_KEY.",
+    "When woken by an advisor, read the steering comment PAPERCLIP_WAKE_COMMENT_ID",
+    "on issue PAPERCLIP_ISSUE_ID and post your work back to that issue.",
+    "",
+    "```",
+    ...lines,
+    "```",
+  ].join("\n");
 }
 
 function failure(
@@ -90,9 +158,14 @@ export async function execute(
   });
   const wakeJson =
     stringifyPaperclipWakePayload(ctx.context.paperclipWake, {}) ?? "";
+  // Step 4 — wake-env injection: give the remote agent the coordinates it needs
+  // to read the advisor's steering comment and post work back (the callback loop).
+  const paperclipEnv = buildPaperclipRunEnv(ctx);
+  const envBlock = renderPaperclipEnvBlock(paperclipEnv);
   const input = joinPromptSections([
     instructions,
     renderedTemplate,
+    envBlock,
     wakePrompt,
     wakeJson,
   ]);
@@ -120,6 +193,9 @@ export async function execute(
         ...(model ? { model } : {}),
         input,
         stream: true,
+        // Structured mirror of the run context; a Responses-compatible gateway
+        // that surfaces metadata to the agent can read it without parsing prose.
+        metadata: paperclipEnv,
       }),
     });
 

@@ -44,6 +44,24 @@ export function IronclawGatewayConfigFields({
           placeholder="gateway bearer token"
         />
       </Field>
+      <Field
+        label="Paperclip API URL (callback)"
+        hint="Network-reachable base URL of THIS Paperclip API, injected into the run context so the remote agent can read steering comments and post work back. Set to a Tailscale/LAN address the IronClaw box can reach; a localhost default won't resolve from another host."
+      >
+        <DraftInput
+          value={eff(
+            "adapterConfig",
+            "paperclipApiUrl",
+            String(config.paperclipApiUrl ?? ""),
+          )}
+          onCommit={(v) =>
+            mark("adapterConfig", "paperclipApiUrl", v || undefined)
+          }
+          immediate
+          className={inputClass}
+          placeholder="https://100.72.16.52:8787"
+        />
+      </Field>
     </>
   );
 }

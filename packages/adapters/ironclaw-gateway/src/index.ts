@@ -33,6 +33,11 @@ Core fields:
 - instructionsFilePath (string, optional): absolute path to a markdown
   instructions file prepended to the task as system guidance.
 - headers (object, optional): extra request headers.
+- paperclipApiUrl (string, optional): network-reachable base URL of THIS
+  Paperclip API, injected into the run context so the remote agent can call back
+  (read steering comments, post work). Required for real steering when the agent
+  runs on a different host — a localhost default won't resolve from the IronClaw
+  box; set it to a Tailscale/LAN address the gateway can reach.
 
 Control / steering:
 - wakePath (string, optional): control-hook path for live steering, default
