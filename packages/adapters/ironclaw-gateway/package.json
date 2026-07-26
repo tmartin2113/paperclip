@@ -1,0 +1,16 @@
+{
+  "name": "@paperclipai/adapter-ironclaw-gateway",
+  "version": "0.1.0",
+  "license": "MIT",
+  "homepage": "https://github.com/paperclipai/paperclip",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./server": "./src/server/index.ts",
+    "./ui": "./src/ui/index.ts",
+    "./cli": "./src/cli/index.ts"
+  },
+  "dependencies": {
+    "@paperclipai/adapter-utils": "workspace:*"
+  }
+}
