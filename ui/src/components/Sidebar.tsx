@@ -23,6 +23,7 @@ import {
   MessagesSquare,
   GanttChartSquare,
   LayoutGrid,
+  HeartPulse,
 } from "lucide-react";
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -37,6 +38,7 @@ import { useCompany } from "../context/CompanyContext";
 import { useSidebar } from "../context/SidebarContext";
 import { attentionApi } from "../api/attention";
 import { heartbeatsApi } from "../api/heartbeats";
+import { healthApi } from "../api/health";
 import { instanceSettingsApi } from "../api/instanceSettings";
 import { queryKeys } from "../lib/queryKeys";
 import { attentionBadgeCount } from "../lib/attention";
@@ -63,6 +65,13 @@ export function Sidebar() {
     queryKey: queryKeys.instance.experimentalSettings,
     queryFn: () => instanceSettingsApi.getExperimental(),
   });
+  const { data: health } = useQuery({
+    queryKey: queryKeys.health,
+    queryFn: () => healthApi.get(),
+    retry: false,
+  });
+  const infraHealthEnabled =
+    health?.features?.infrastructureHealthEnabled ?? false;
   const liveRunsQueryKey = queryKeys.liveRuns(selectedCompanyId!);
   const sharedLiveRuns = useSharedPollingQuery({
     companyId: selectedCompanyId,
@@ -283,6 +292,13 @@ export function Sidebar() {
           <SidebarNavItem to="/timeline" label="Timeline" icon={GanttChartSquare} />
           <SidebarNavItem to="/costs" label="Costs" icon={DollarSign} />
           <SidebarNavItem to="/activity" label="Activity" icon={History} />
+          {infraHealthEnabled && (
+            <SidebarNavItem
+              to="/company/infrastructure"
+              label="Infrastructure"
+              icon={HeartPulse}
+            />
+          )}
           <SidebarNavItem to="/company/settings" label="Settings" icon={Settings} />
         </SidebarSection>
 
