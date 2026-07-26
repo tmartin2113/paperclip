@@ -24,12 +24,17 @@ Don't use when:
 - Your gateway ONLY speaks the OpenClaw WebSocket protocol (use openclaw_gateway).
 
 Core fields:
-- url (string, required): base URL of the IronClaw gateway (e.g.
-  https://100.72.16.52:3001). The adapter POSTs to \`\${url}/v1/responses\`.
+- url (string, required): base URL of the IronClaw gateway. Use the scheme the
+  gateway actually serves — a native IronClaw gateway speaks plain HTTP (e.g.
+  http://100.72.16.52:3001); use https only if it's behind a TLS-terminating
+  proxy. The adapter POSTs to \`\${url}/v1/responses\`.
 - token (string, required): Bearer token for the gateway (sent as
   Authorization: Bearer <token>).
-- model (string, optional): model id to request (e.g. qwen3.6:27b). Omit to use
-  the gateway default.
+- model (string, optional): model id to request. Leave UNSET for a native
+  IronClaw gateway — it selects its own model and (currently) rejects explicit
+  selection, accepting only an omitted model or the sentinel "default" (which
+  this adapter treats as "omit"). Set a real id only for a gateway that supports
+  model selection.
 - instructionsFilePath (string, optional): absolute path to a markdown
   instructions file prepended to the task as system guidance.
 - headers (object, optional): extra request headers.

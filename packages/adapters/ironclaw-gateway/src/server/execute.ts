@@ -158,7 +158,13 @@ export async function execute(
   if (!url) return failure("ironclaw_gateway_url_missing", "url is required");
   if (!token) return failure("ironclaw_gateway_token_missing", "token is required");
 
-  const model = cfgString(ctx.config, "model");
+  // IronClaw's gateway currently selects its own model and rejects explicit
+  // selection, accepting only an omitted model or the sentinel "default". Treat
+  // "default" as "omit" so the documented sentinel works, and pass any other
+  // value through for gateways that do support selection.
+  const rawModel = cfgString(ctx.config, "model");
+  const model =
+    rawModel && rawModel.toLowerCase() !== "default" ? rawModel : undefined;
   const timeoutSec = cfgNumber(ctx.config, "timeoutSec") ?? 120;
 
   // Session resume: Paperclip hands back the prior run's response id via

@@ -32,7 +32,7 @@ export function IronclawGatewayConfigFields({
           }
           immediate
           className={inputClass}
-          placeholder="https://100.72.16.52:3001"
+          placeholder="http://100.72.16.52:3001"
         />
       </Field>
       <Field label="Bearer token">
