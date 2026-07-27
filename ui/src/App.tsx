@@ -44,6 +44,7 @@ import { WhatNeedsMe } from "./pages/WhatNeedsMe";
 import { TrainingInspector, TrainingLibrary } from "./pages/Training";
 import { BoardChat } from "./pages/BoardChat";
 import { CompanySettings } from "./pages/CompanySettings";
+import { InfrastructureHealth } from "./pages/InfrastructureHealth";
 import { CompanyEnvironments } from "./pages/CompanyEnvironments";
 import { CloudUpstream } from "./pages/CloudUpstream";
 import { CloudUpstreamUxLab } from "./pages/CloudUpstreamUxLab";
@@ -105,6 +106,7 @@ function boardRoutes() {
       <Route path="onboarding" element={<OnboardingRoutePage />} />
       <Route path="companies" element={<Companies />} />
       <Route path="company/settings" element={<CompanySettings />} />
+      <Route path="company/infrastructure" element={<InfrastructureHealth />} />
       <Route path="company/settings/environments" element={<Navigate to="/company/settings/instance/environments" replace />} />
       <Route path="company/settings/cloud-upstream" element={<CloudUpstream />} />
       <Route path="company/settings/members" element={<CompanyAccess />} />

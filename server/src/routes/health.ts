@@ -16,6 +16,7 @@ import {
 } from "../services/database-backup-health.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { serverVersion } from "../version.js";
+import { PAPERCLIP_HEALTH_URL } from "./infrastructure-health.js";
 
 function shouldExposeFullHealthDetails(
   actorType: "none" | "board" | "agent" | null | undefined,
@@ -230,6 +231,7 @@ export function healthRoutes(
       bootstrapInviteActive,
       features: {
         companyDeletionEnabled: opts.companyDeletionEnabled,
+        infrastructureHealthEnabled: !!PAPERCLIP_HEALTH_URL,
       },
       serverInfo,
       ...(databaseBackup ? { databaseBackup } : {}),
