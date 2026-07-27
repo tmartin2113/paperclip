@@ -409,9 +409,100 @@ export async function execute(
   }
 }
 
+// IronClaw file-editing tools → the Visibility editType they map to. Emitting a
+// "file.edit" run-event (which the runtime persists to heartbeatRunEvents) is
+// what surfaces the edit on Paperclip's Visibility page.
+const FILE_TOOL_EDIT_TYPES: Record<string, "create" | "modify" | "delete"> = {
+  write_file: "create",
+  create_file: "create",
+  apply_patch: "modify",
+  edit_file: "modify",
+  str_replace: "modify",
+  str_replace_editor: "modify",
+  patch_file: "modify",
+  delete_file: "delete",
+  remove_file: "delete",
+};
+
+function extractFilePath(args: Record<string, unknown>): string {
+  for (const k of [
+    "path",
+    "file_path",
+    "filePath",
+    "filename",
+    "target_file",
+    "file",
+    "filepath",
+  ]) {
+    const v = args[k];
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return "";
+}
+
+/**
+ * If the event is a completed file-editing tool call, emit a "file.edit"
+ * run-event so the edit appears on Paperclip's Visibility page. Best-effort: the
+ * gateway must populate the function_call `arguments` with the target path; if
+ * it doesn't, or the tool isn't a file tool, nothing is emitted (the raw event
+ * is still forwarded separately).
+ */
+async function maybeEmitFileEdit(
+  ctx: AdapterExecutionContext,
+  event: Record<string, unknown>,
+): Promise<void> {
+  if (!ctx.onEvent) return;
+  if (event.type !== "response.output_item.done") return;
+  const item =
+    event.item && typeof event.item === "object"
+      ? (event.item as Record<string, unknown>)
+      : null;
+  if (!item || item.type !== "function_call") return;
+  const name = typeof item.name === "string" ? item.name : "";
+  const editType = FILE_TOOL_EDIT_TYPES[name];
+  if (!editType) return;
+
+  const rawArgs =
+    typeof item.arguments === "string" ? item.arguments.trim() : "";
+  let args: Record<string, unknown> = {};
+  if (rawArgs) {
+    try {
+      const parsed = JSON.parse(rawArgs);
+      if (parsed && typeof parsed === "object") {
+        args = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Not JSON — IronClaw's gateway emits the file path as a bare summary
+      // string in `arguments` (its safe param-summary, path only, no content).
+    }
+  }
+  // Prefer a path key from JSON args; else fall back to a bare-path summary.
+  const filePath =
+    extractFilePath(args) || (rawArgs && !rawArgs.startsWith("{") ? rawArgs : "");
+  if (!filePath) return; // no path → can't attribute the edit; skip.
+
+  const content = typeof args.content === "string" ? args.content : "";
+  const linesAdded =
+    editType === "create" && content ? content.split("\n").length : 0;
+
+  await ctx.onEvent({
+    eventType: "file.edit",
+    stream: "system",
+    payload: {
+      filePath,
+      editType,
+      diff: content ? content.slice(0, 4000) : "",
+      linesAdded,
+      linesRemoved: 0,
+      timestamp: new Date().toISOString(),
+    },
+  });
+}
+
 /**
  * Map an OpenAI-Responses SSE event onto Paperclip's run callbacks: text deltas
- * to stdout, everything else to a structured runtime event.
+ * to stdout, everything else to a structured runtime event. Completed file-tool
+ * calls additionally emit a "file.edit" event for the Visibility page.
  */
 async function forwardEvent(
   ctx: AdapterExecutionContext,
@@ -423,6 +514,7 @@ async function forwardEvent(
     if (delta) await ctx.onLog("stdout", delta);
     return;
   }
+  await maybeEmitFileEdit(ctx, event);
   if (ctx.onEvent) {
     await ctx.onEvent({
       eventType,
