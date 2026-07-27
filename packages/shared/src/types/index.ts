@@ -750,6 +750,7 @@ export type {
   HeartbeatRun,
   HeartbeatRunEvent,
   HeartbeatRunStatusPhase,
+  FileEditEventData,
   AgentRuntimeState,
   AgentTaskSession,
   AgentWakeupRequest,

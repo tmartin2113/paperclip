@@ -6,6 +6,7 @@ import {
   LayoutDashboard,
   DollarSign,
   History,
+  Eye,
   Search,
   SquarePen,
   Network,
@@ -299,6 +300,7 @@ export function Sidebar() {
               icon={HeartPulse}
             />
           )}
+          <SidebarNavItem to="/visibility" label="Visibility" icon={Eye} liveCount={liveRunCount} />
           <SidebarNavItem to="/company/settings" label="Settings" icon={Settings} />
         </SidebarSection>
 
