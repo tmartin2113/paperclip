@@ -12,7 +12,7 @@ import {
   normalizePaperclipWakePayload,
   renderPaperclipWakePrompt,
   renderTemplate,
-  stringifyPaperclipWakePayload,
+  selectPaperclipTaskMarkdown,
 } from "@paperclipai/adapter-utils/server-utils";
 
 function cfgString(
@@ -263,13 +263,24 @@ export async function execute(
     cfgString(ctx.config, "promptTemplate") ??
     DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE;
   const renderedTemplate = renderTemplate(templateSource, { agent: ctx.agent });
-  const wakePrompt = renderPaperclipWakePrompt(ctx.context.paperclipWake, {
-    includeExecutionContract: true,
+  // The task-context markdown is the authoritative issue brief; it uses the
+  // compact variant (description stripped) on resume deltas, where the session
+  // already saw the full brief. Suppress the wake prompt's own description copy
+  // so the issue text rides the prompt exactly once. Previously this lane sent
+  // the description up to three times — wake-prose + a full wake-payload JSON
+  // dump — which dominated the per-turn token cost (~30K prompts on a 27B).
+  const taskContextNote = selectPaperclipTaskMarkdown(ctx.context, {
+    resumedSession: Boolean(priorSessionId),
   });
-  const wakeJson =
-    stringifyPaperclipWakePayload(ctx.context.paperclipWake, {}) ?? "";
+  const wakePrompt = renderPaperclipWakePrompt(ctx.context.paperclipWake, {
+    resumedSession: Boolean(priorSessionId),
+    includeExecutionContract: true,
+    suppressIssueDescription: taskContextNote.length > 0,
+  });
   // Step 4 — wake-env injection: give the remote agent the coordinates it needs
   // to read the advisor's steering comment and post work back (the callback loop).
+  // The structured wake payload rides `metadata` (below), not the prompt input,
+  // so gateways that parse structured data still get it without token cost.
   const paperclipEnv = buildPaperclipRunEnv(ctx);
   const envBlock = renderPaperclipEnvBlock(paperclipEnv);
   const input = joinPromptSections([
@@ -277,7 +288,7 @@ export async function execute(
     renderedTemplate,
     envBlock,
     wakePrompt,
-    wakeJson,
+    taskContextNote,
   ]);
 
   const endpoint = `${url.replace(/\/+$/, "")}/v1/responses`;
