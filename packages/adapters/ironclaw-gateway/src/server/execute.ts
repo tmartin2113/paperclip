@@ -300,6 +300,12 @@ export async function execute(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutSec * 1000);
 
+  // Log request details for debugging gateway hangs
+  await ctx.onLog(
+    "stderr",
+    `[ironclaw-gateway] POST ${endpoint} (timeout: ${timeoutSec}s, model: ${model || "omitted"}, previous_response_id: ${priorSessionId || "none"})\n`,
+  );
+
   try {
     const res = await fetch(endpoint, {
       method: "POST",
@@ -325,6 +331,8 @@ export async function execute(
       const body = await res.text().catch(() => "");
       const retryAfter = parseRetryAfter(res.headers.get("retry-after"));
       const cls = classifyGatewayHttpError(res.status, retryAfter, body);
+      const errMsg = `[ironclaw-gateway] HTTP ${res.status}: ${body.slice(0, 200)}\n`;
+      await ctx.onLog("stderr", errMsg);
       return {
         exitCode: 1,
         signal: null,
@@ -335,6 +343,12 @@ export async function execute(
         ...(cls.retryNotBefore ? { retryNotBefore: cls.retryNotBefore } : {}),
       };
     }
+
+    // Log successful HTTP response with streaming indicator
+    await ctx.onLog(
+      "stderr",
+      `[ironclaw-gateway] HTTP 200 OK, beginning SSE stream...\n`,
+    );
 
     // Parse the SSE stream: events are separated by a blank line; each carries
     // one or more `data:` lines whose concatenation is a JSON Responses event.
@@ -410,6 +424,11 @@ export async function execute(
     }
 
     clearTimeout(inactivityTimer);
+
+    await ctx.onLog(
+      "stderr",
+      `[ironclaw-gateway] SSE stream completed successfully (${usage ? "with" : "without"} usage data)\n`,
+    );
 
     return {
       exitCode: 0,
