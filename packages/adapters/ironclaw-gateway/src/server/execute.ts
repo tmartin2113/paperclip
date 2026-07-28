@@ -346,9 +346,34 @@ export async function execute(
     // on completion, the token usage.
     let usage: UsageSummary | undefined;
     let sessionId: string | undefined;
+
+    // Inactivity timeout: if no data arrives for 30s, the stream is stalled and
+    // we should emit an error and abort. This catches hangs where the gateway
+    // accepts the request but Ollama is unresponsive.
+    const inactivitySec = 30;
+    let inactivityTimer = setTimeout(() => {
+      controller.abort();
+      // Emit diagnostic message before abort takes effect
+      ctx.onLog(
+        "stderr",
+        `[ironclaw-gateway] SSE stream inactivity timeout (${inactivitySec}s): no data received from gateway; Ollama may be unresponsive.\n`,
+      ).catch(() => {});
+    }, inactivitySec * 1000);
+
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
+
+      // Reset inactivity timer on every read, even if value is empty
+      clearTimeout(inactivityTimer);
+      inactivityTimer = setTimeout(() => {
+        controller.abort();
+        ctx.onLog(
+          "stderr",
+          `[ironclaw-gateway] SSE stream inactivity timeout (${inactivitySec}s): no data received from gateway; Ollama may be unresponsive.\n`,
+        ).catch(() => {});
+      }, inactivitySec * 1000);
+
       buffer += decoder.decode(value, { stream: true });
       let sep: number;
       while ((sep = buffer.indexOf("\n\n")) !== -1) {
@@ -384,6 +409,8 @@ export async function execute(
       }
     }
 
+    clearTimeout(inactivityTimer);
+
     return {
       exitCode: 0,
       signal: null,
@@ -395,11 +422,14 @@ export async function execute(
     };
   } catch (err) {
     if (controller.signal.aborted) {
+      // Emit error message before returning so agent sees why run timed out.
+      const timedOutMsg = `[ironclaw-gateway] SSE stream timeout after ${timeoutSec}s: gateway accepted request but never completed the response stream. Check gateway logs for Ollama connectivity or request hangs.\n`;
+      await ctx.onLog("stderr", timedOutMsg);
       return {
         exitCode: null,
         signal: null,
         timedOut: true,
-        errorMessage: `run exceeded ${timeoutSec}s`,
+        errorMessage: timedOutMsg.trim(),
         errorCode: "ironclaw_gateway_timeout",
       };
     }
@@ -407,6 +437,8 @@ export async function execute(
     // the gateway may be briefly unreachable (e.g. a boot-race between the
     // container and its network). Mark it transient_upstream so the heartbeat
     // retries with backoff rather than hard-failing the run.
+    const transportErrMsg = `[ironclaw-gateway] transport error: ${String(err)}\n`;
+    await ctx.onLog("stderr", transportErrMsg);
     return {
       exitCode: 1,
       signal: null,
