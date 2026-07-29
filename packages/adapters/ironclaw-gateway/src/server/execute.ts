@@ -306,6 +306,29 @@ export async function execute(
     `[ironclaw-gateway] POST ${endpoint} (timeout: ${timeoutSec}s, model: ${model || "omitted"}, previous_response_id: ${priorSessionId || "none"})\n`,
   );
 
+  // Paperclip doer marker (rides x_context.paperclip). Two independent, opt-in
+  // per-agent signals share this namespace; the marker is sent only when at
+  // least one is configured:
+  //   - containedWorkspace=true -> project_id + agent_id: Route B container
+  //     containment (fs/shell tools run in a per-project rootless-podman
+  //     container, egress denied). For coding/infra doers (Engineer, DevOps).
+  //   - reasoning "on"|"off" -> reasoning: per-agent thinking toggle. IronClaw
+  //     passes Ollama `think` accordingly; "off" skips qwen3's <think> block so
+  //     the local model is FAST for interactive/tool-heavy work. Default doers
+  //     to "off"; leave unset for agents that need deep reasoning.
+  // IronClaw keys containment on project_id presence, so a reasoning-only marker
+  // (no project_id) runs un-contained. The OWUI/Slack assistant uses a different
+  // pipe and never emits this key -> keeps containment off AND thinking on.
+  const paperclipMarker: Record<string, string> = {};
+  if (ctx.config.containedWorkspace === true) {
+    paperclipMarker.project_id = ctx.agent.id;
+    paperclipMarker.agent_id = ctx.agent.id;
+  }
+  const reasoning = cfgString(ctx.config, "reasoning");
+  if (reasoning === "on" || reasoning === "off") {
+    paperclipMarker.reasoning = reasoning;
+  }
+
   try {
     const res = await fetch(endpoint, {
       method: "POST",
@@ -321,30 +344,13 @@ export async function execute(
         ...(priorSessionId ? { previous_response_id: priorSessionId } : {}),
         input,
         stream: true,
-        // Route B doer marker — OPT-IN per agent via adapterConfig.containedWorkspace.
-        // IronClaw's contained-workspace wiring treats a /v1/responses request
-        // carrying x_context.paperclip.{project_id, agent_id} as a CONTAINED doer
-        // run: its file/shell tools execute inside a per-project rootless-podman
-        // container (writes confined to /project, egress denied, only the fs/shell
-        // tool surface) instead of on the host.
-        //
-        // Containment is TASK-TYPE-AWARE: coding/infra agents (Engineer, DevOps)
-        // set containedWorkspace=true and run contained — appropriate for isolated
-        // file deliverables. RESEARCH/tool agents (Researcher) leave it unset and
-        // run UN-CONTAINED, because they need the full tool surface (web research,
-        // the trek_* trip tools, MCP tools) and network access that containment
-        // strips. Absent marker => IronClaw runs the request on its normal
-        // (un-contained) path. The OWUI/Slack personal-assistant surfaces use a
-        // different pipe and never emit this key.
-        ...(ctx.config.containedWorkspace === true
-          ? {
-              x_context: {
-                paperclip: {
-                  project_id: ctx.agent.id,
-                  agent_id: ctx.agent.id,
-                },
-              },
-            }
+        // Paperclip doer marker — see paperclipMarker construction above.
+        // Carries up to two OPT-IN per-agent signals: containment
+        // (project_id/agent_id, when containedWorkspace=true) and the thinking
+        // toggle (reasoning "on"/"off"). Sent only when at least one is set;
+        // absent marker => IronClaw runs its normal un-contained, think-on path.
+        ...(Object.keys(paperclipMarker).length > 0
+          ? { x_context: { paperclip: paperclipMarker } }
           : {}),
         // Structured mirror of the run context; a Responses-compatible gateway
         // that surfaces metadata to the agent can read it without parsing prose.
