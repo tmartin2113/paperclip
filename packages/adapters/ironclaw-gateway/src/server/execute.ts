@@ -321,6 +321,23 @@ export async function execute(
         ...(priorSessionId ? { previous_response_id: priorSessionId } : {}),
         input,
         stream: true,
+        // MANDATORY Route B doer marker. IronClaw's contained-workspace wiring
+        // treats a /v1/responses request carrying x_context.paperclip.{project_id,
+        // agent_id} as a Paperclip DOER run: its file/shell tools execute inside
+        // a per-project rootless-podman container (writes confined to /project,
+        // egress denied) instead of on the host. This adapter is used ONLY by
+        // Paperclip doer agents, so every request it sends is a doer run — the
+        // personal-assistant surfaces (OWUI/Slack) use a different pipe and must
+        // never emit this key. project_id keys the container/workspace per agent
+        // (isolated + persistent across that agent's runs); both fields are
+        // required by IronClaw (a missing/partial marker is refused, never run
+        // uncontained).
+        x_context: {
+          paperclip: {
+            project_id: ctx.agent.id,
+            agent_id: ctx.agent.id,
+          },
+        },
         // Structured mirror of the run context; a Responses-compatible gateway
         // that surfaces metadata to the agent can read it without parsing prose.
         metadata: paperclipEnv,
