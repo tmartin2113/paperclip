@@ -321,23 +321,31 @@ export async function execute(
         ...(priorSessionId ? { previous_response_id: priorSessionId } : {}),
         input,
         stream: true,
-        // MANDATORY Route B doer marker. IronClaw's contained-workspace wiring
-        // treats a /v1/responses request carrying x_context.paperclip.{project_id,
-        // agent_id} as a Paperclip DOER run: its file/shell tools execute inside
-        // a per-project rootless-podman container (writes confined to /project,
-        // egress denied) instead of on the host. This adapter is used ONLY by
-        // Paperclip doer agents, so every request it sends is a doer run — the
-        // personal-assistant surfaces (OWUI/Slack) use a different pipe and must
-        // never emit this key. project_id keys the container/workspace per agent
-        // (isolated + persistent across that agent's runs); both fields are
-        // required by IronClaw (a missing/partial marker is refused, never run
-        // uncontained).
-        x_context: {
-          paperclip: {
-            project_id: ctx.agent.id,
-            agent_id: ctx.agent.id,
-          },
-        },
+        // Route B doer marker — OPT-IN per agent via adapterConfig.containedWorkspace.
+        // IronClaw's contained-workspace wiring treats a /v1/responses request
+        // carrying x_context.paperclip.{project_id, agent_id} as a CONTAINED doer
+        // run: its file/shell tools execute inside a per-project rootless-podman
+        // container (writes confined to /project, egress denied, only the fs/shell
+        // tool surface) instead of on the host.
+        //
+        // Containment is TASK-TYPE-AWARE: coding/infra agents (Engineer, DevOps)
+        // set containedWorkspace=true and run contained — appropriate for isolated
+        // file deliverables. RESEARCH/tool agents (Researcher) leave it unset and
+        // run UN-CONTAINED, because they need the full tool surface (web research,
+        // the trek_* trip tools, MCP tools) and network access that containment
+        // strips. Absent marker => IronClaw runs the request on its normal
+        // (un-contained) path. The OWUI/Slack personal-assistant surfaces use a
+        // different pipe and never emit this key.
+        ...(ctx.config.containedWorkspace === true
+          ? {
+              x_context: {
+                paperclip: {
+                  project_id: ctx.agent.id,
+                  agent_id: ctx.agent.id,
+                },
+              },
+            }
+          : {}),
         // Structured mirror of the run context; a Responses-compatible gateway
         // that surfaces metadata to the agent can read it without parsing prose.
         metadata: paperclipEnv,
