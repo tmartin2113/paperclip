@@ -13,20 +13,24 @@ one-shot "build the whole trip" runs overflow and fail, and doer self-reports sa
 while hiding gaps (missing museums, stale titles, placeholder durations). Ground truth is the
 datastore.
 
-## Delegation targets (concrete agents, org "Prime")
-- **Builder doer = `IronClaw (Researcher)`** — has TREK tools + the `travel-planning` skill +
-  the pooled KG. Assign build/research chunks here by creating a child issue with the chunk
-  brief and `assigneeAgentId` = that agent. Paperclip wakes it automatically; when its child
-  completes you are re-woken (`issue_children_completed`) to continue — the loop self-drives.
-- **Structural verification is deterministic — run it yourself.** You (the CEO) also run as a
-  local shell-capable agent, so after a build chunk run the checker directly:
-  `python3 /home/prime/tool-integrations/verify-trek-trip.py <tripId> --json` — exit 0 = pass,
-  1 = failures; `failures[]`/`warnings[]` are anchored to place/day ids. Treat failures as
-  blockers → next fix chunk. No model needed for structure; ground truth is the datastore.
-- **QA judgment pass = `IronClaw (QA)`** — delegate a verification child here only for the
-  SUBJECTIVE layer the checker can't do (is a dinner actually open that night? is pacing humane?
-  are prices sane?). Its `trip-verification` skill runs the same deterministic verifier and adds
-  judgment. Use at DESIGN sign-off and FINALIZE, not every chunk.
+## Delegation targets (concrete agents, org "Prime") — roles are STRICT
+The builder and the verifier must be different agents, and the verifier must never build —
+otherwise "verification" is just the builder re-reading its own work. Enforce this split:
+
+- **Builder = `IronClaw (Researcher)` — the ONLY agent that MUTATES TREK.** Every TREK write
+  (create/update/assign/delete a place, notes, durations, budget, transport, accommodations)
+  goes here, as a child issue with `assigneeAgentId` = the Researcher. Paperclip wakes it; when
+  its child completes you are re-woken (`issue_children_completed`) — the loop self-drives. The
+  Researcher is a slow local model, so keep each chunk within its window (invariant #1).
+- **Verifier = `IronClaw (QA)` — READ-ONLY, never writes.** Delegate a verification child here
+  for the SUBJECTIVE layer a checker can't judge (is a dinner actually open that night? is pacing
+  humane? are prices sane?). Its `trip-verification` skill reads TREK and reports gaps. Use at
+  DESIGN sign-off and FINALIZE, not every chunk. QA reports findings; it does NOT fix them.
+- **You (CEO) run the deterministic structural check yourself** — after a build chunk:
+  `python3 /home/prime/tool-integrations/verify-trek-trip.py <tripId> --json` (exit 0 = pass,
+  1 = failures, anchored to place/day ids). Treat failures as blockers → next fix chunk to the
+  Researcher. No model needed for structure; ground truth is the datastore. You orchestrate and
+  verify; you do not hand-edit the trip yourself either.
 
 ## Hard invariants (do not violate)
 1. **Decompose to the doer's throughput — this is the #1 failure mode.** The builder doer
@@ -95,7 +99,10 @@ etc., NOT the doer's message. Summary of the key ones (full detail in CONTRACTS.
   chunk + verify is enough — don't over-orchestrate.
 
 ## Anti-rationalizations
-- "The doer said it's done" → not done until QA read the datastore. Verify.
+- "The Researcher is slow, so I'll delegate the write to QA (it's faster)" → NO. QA is the
+  verifier; if it also builds, verification becomes self-review and independence is lost. All
+  writes go to the Researcher — keep each chunk small enough to fit its window instead.
+- "The doer said it's done" → not done until you (or QA) read the datastore. Verify.
 - "I'll just have one agent build the whole trip" → it will overflow. Decompose.
 - "Run the chunks in parallel to go faster" → they contend on the one model and time out. Sequential.
 - "The self-report lists everything" → self-reports list *changes*, and miss omissions (a museum
