@@ -13,9 +13,31 @@ one-shot "build the whole trip" runs overflow and fail, and doer self-reports sa
 while hiding gaps (missing museums, stale titles, placeholder durations). Ground truth is the
 datastore.
 
+## Delegation targets (concrete agents, org "Prime")
+- **Builder doer = `IronClaw (Researcher)`** — has TREK tools + the `travel-planning` skill +
+  the pooled KG. Assign build/research chunks here by creating a child issue with the chunk
+  brief and `assigneeAgentId` = that agent. Paperclip wakes it automatically; when its child
+  completes you are re-woken (`issue_children_completed`) to continue — the loop self-drives.
+- **Structural verification is deterministic — run it yourself.** You (the CEO) also run as a
+  local shell-capable agent, so after a build chunk run the checker directly:
+  `python3 /home/prime/tool-integrations/verify-trek-trip.py <tripId> --json` — exit 0 = pass,
+  1 = failures; `failures[]`/`warnings[]` are anchored to place/day ids. Treat failures as
+  blockers → next fix chunk. No model needed for structure; ground truth is the datastore.
+- **QA judgment pass = `IronClaw (QA)`** — delegate a verification child here only for the
+  SUBJECTIVE layer the checker can't do (is a dinner actually open that night? is pacing humane?
+  are prices sane?). Its `trip-verification` skill runs the same deterministic verifier and adds
+  judgment. Use at DESIGN sign-off and FINALIZE, not every chunk.
+
 ## Hard invariants (do not violate)
-1. **Decompose.** Never delegate a task expected to exceed ~25 tool calls. One base, or one
-   concern (accommodations / budget / transport / dining / durations / notes), per chunk.
+1. **Decompose to the doer's throughput — this is the #1 failure mode.** The builder doer
+   is a slow local model on a hard per-run wall-clock timeout. Size every chunk to finish
+   comfortably inside that wall, NOT to an abstract tool-call budget. Empirically: **one
+   datastore item that needs a few tool calls** (e.g. one place: read → find → update ≈ 3–5
+   calls) completes fine; **~four such items in one chunk TIMES OUT.** So for a task touching
+   N items where each needs several tool calls (e.g. "add booking notes to 4 wineries",
+   "geocode 6 stops", "fix durations on a day"), delegate **ONE item per chunk**, sequentially.
+   Never bundle multiple multi-call items into one chunk. When unsure, split smaller. One base,
+   or one concern, or one item — per chunk.
 2. **Truth over report.** A chunk is "done" only when QA has re-read TREK/KG and the chunk's
    verification contract passes. The doer's `status` ("failed"/"completed") and prose summary
    are UNTRUSTED — heavy runs report "failed" while their writes landed, and "completed" while
@@ -38,10 +60,11 @@ datastore.
    `[per-base leg]×N → accommodations → budget → transport → dining(per base) → durations → notes sweep`.
    Record it as a checklist / subtasks so you can track done-vs-pending.
 5. **BUILD + VERIFY loop** — for each chunk, in order:
-   a. Delegate the bounded chunk to the builder doer (explicit "do ONLY this").
-   b. **QA verifies** by reading TREK/KG and checking the chunk's contract (below). QA reports
-      concrete gaps, not a thumbs-up.
-   c. If gaps → delegate a targeted fix chunk for exactly those gaps; re-verify. Max ~3 fix
+   a. Delegate the bounded chunk to `IronClaw (Researcher)` (explicit "do ONLY this").
+   b. **Verify against the datastore** — when the child completes and re-wakes you, run
+      `verify-trek-trip.py <tripId> --json` yourself (deterministic; never trust the doer's
+      summary). At DESIGN/FINALIZE also delegate the subjective judgment pass to `IronClaw (QA)`.
+   c. If failures → delegate a targeted fix chunk for exactly those gaps; re-verify. Max ~3 fix
       cycles per chunk before escalating to the user.
 6. **FINALIZE** — run a full-trip verification pass; your summary to the user must match what an
    independent datastore read shows (no claim/evidence drift). Then stop.
