@@ -34,7 +34,15 @@ export function buildClaudeProbePermissionArgs(input: {
 export function buildClaudeExecutionPermissionArgs(input: {
   dangerouslySkipPermissions: boolean;
   targetIsRemote: boolean;
+  restrictedAllowedTools?: string | null;
 }): string[] {
+  // Orchestrator-restricted mode: fence the agent to EXACTLY the listed tools
+  // (e.g. only an orchestration MCP) instead of blanket-allowing everything.
+  // This is how a Claude orchestrator is denied general Bash/file/network so it
+  // cannot do downstream work itself and must delegate to a doer. Non-listed
+  // tools get a permission prompt, which in a non-interactive run = denied.
+  const restricted = input.restrictedAllowedTools?.trim();
+  if (restricted) return ["--allowedTools", restricted];
   if (!input.dangerouslySkipPermissions) return [];
   if (input.targetIsRemote) {
     return ["--allowedTools", SANDBOX_ALLOWED_TOOLS];

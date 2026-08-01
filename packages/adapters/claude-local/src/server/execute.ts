@@ -426,6 +426,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const chrome = asBoolean(config.chrome, false);
   const maxTurns = asNumber(config.maxTurnsPerRun, 0);
   const dangerouslySkipPermissions = asBoolean(config.dangerouslySkipPermissions, true);
+  // Orchestrator-restricted mode: fence this agent to a single stdio MCP (the
+  // orchestration toolset) with no general Bash/file/network, so a Claude
+  // orchestrator cannot do downstream work itself and must delegate to a doer.
+  const orchestratorRestricted = asBoolean(config.orchestratorRestricted, false);
+  const orchestrateMcpCfg = parseObject(config.orchestrateMcp);
   const configEnv = parseObject(config.env);
   const workspaceContext = parseObject(context.paperclipWorkspace);
   const workspaceCwd = asString(workspaceContext.cwd, "");
@@ -511,6 +516,28 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     onLog,
   });
   const runtimeMcpServers = ctx.runtimeMcp?.getServers() ?? [];
+  const orchestrateMcpName = asString(orchestrateMcpCfg.name, "paperclip-orchestrate");
+  const orchestrateStdioServers =
+    orchestratorRestricted && asString(orchestrateMcpCfg.command, "").length > 0
+      ? [
+          {
+            name: orchestrateMcpName,
+            command: asString(orchestrateMcpCfg.command, ""),
+            args: (Array.isArray(orchestrateMcpCfg.args) ? orchestrateMcpCfg.args : []).map((a) =>
+              String(a),
+            ),
+            env: Object.fromEntries(
+              Object.entries(parseObject(orchestrateMcpCfg.env)).map(([k, v]) => [k, String(v)]),
+            ) as Record<string, string>,
+          },
+        ]
+      : [];
+  // When restricted, drop the HTTP connection surface entirely — the agent gets
+  // ONLY the orchestration MCP, nothing else.
+  const effectiveHttpMcpServers = orchestratorRestricted ? [] : runtimeMcpServers;
+  const restrictedAllowedTools = orchestratorRestricted
+    ? asString(orchestrateMcpCfg.allowedTools, `mcp__${orchestrateMcpName}`)
+    : null;
   const runtimeMcpIdentity = JSON.stringify(
     runtimeMcpServers.map(({ name, url, connectionId }) => ({ name, url, connectionId })),
   );
@@ -522,7 +549,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const localMcpConfigPath = await writePaperclipClaudeMcpConfig({
     stateDir: claudeRuntimeStateDir,
     runId,
-    servers: runtimeMcpServers,
+    servers: effectiveHttpMcpServers,
+    stdioServers: orchestrateStdioServers,
   });
   const localMcpConfigDir = path.dirname(localMcpConfigPath);
   const sharedClaudeConfigDir = resolveSharedClaudeConfigDir(process.env);
@@ -836,6 +864,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     args.push(...buildClaudeExecutionPermissionArgs({
       dangerouslySkipPermissions,
       targetIsRemote: executionTargetIsRemote,
+      restrictedAllowedTools,
     }));
     if (chrome) args.push("--chrome");
     // For Bedrock: only pass --model when the ID is a Bedrock-native identifier
@@ -852,7 +881,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     if (attemptInstructionsFilePath && !resumeSessionId) {
       args.push("--append-system-prompt-file", attemptInstructionsFilePath);
     }
-    if (runtimeMcpServers.length > 0) {
+    if (effectiveHttpMcpServers.length > 0 || orchestrateStdioServers.length > 0) {
       args.push("--mcp-config", effectiveMcpConfigPath, "--strict-mcp-config");
     }
     args.push("--add-dir", effectivePromptBundleAddDir);

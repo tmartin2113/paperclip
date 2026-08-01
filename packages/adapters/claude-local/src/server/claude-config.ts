@@ -150,6 +150,12 @@ export async function writePaperclipClaudeMcpConfig(input: {
   stateDir: string;
   runId: string;
   servers: AdapterRuntimeMcpServer[];
+  stdioServers?: Array<{
+    name: string;
+    command: string;
+    args: string[];
+    env?: Record<string, string>;
+  }>;
 }): Promise<string> {
   const configDir = path.join(input.stateDir, "runs", input.runId, "mcp");
   const configPath = path.join(configDir, "mcp-config.json");
@@ -168,6 +174,24 @@ export async function writePaperclipClaudeMcpConfig(input: {
       type: "http",
       url: server.url,
       headers: { Authorization: `Bearer ${server.token}` },
+    };
+  }
+  // Locally-spawned stdio MCP servers (e.g. the orchestrator toolset). Kept
+  // separate from the HTTP connection list because these are host processes,
+  // not Paperclip-managed remote connections.
+  for (const s of input.stdioServers ?? []) {
+    let name = s.name;
+    let suffix = 2;
+    while (usedNames.has(name)) {
+      name = `${s.name}-${suffix}`;
+      suffix += 1;
+    }
+    usedNames.add(name);
+    mcpServers[name] = {
+      type: "stdio",
+      command: s.command,
+      args: s.args,
+      ...(s.env ? { env: s.env } : {}),
     };
   }
   await fs.mkdir(configDir, { recursive: true });
