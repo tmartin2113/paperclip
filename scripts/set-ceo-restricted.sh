@@ -16,6 +16,8 @@ docker exec -i paperclip-pg psql "$INURL" -Atc \
 echo "== applying =="
 docker exec -i paperclip-pg psql "$INURL" -v ON_ERROR_STOP=1 -c "
 update agents set adapter_config = adapter_config
+  || jsonb_build_object('engine', 'cli')
+  || jsonb_build_object('command', '/home/prime/.local/bin/claude')
   || jsonb_build_object('orchestratorRestricted', true)
   || jsonb_build_object('orchestrateMcp', jsonb_build_object(
        'name','paperclip-orchestrate',

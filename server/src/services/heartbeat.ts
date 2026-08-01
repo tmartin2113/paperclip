@@ -13817,6 +13817,17 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         outcome = "timed_out";
       } else if ((adapterResult.exitCode ?? 0) === 0 && !adapterResult.errorMessage) {
         outcome = "succeeded";
+      } else if (
+        !adapterResult.errorMessage &&
+        hasUnmanagedBackgroundTaskEvidence(adapterResult.resultJson)
+      ) {
+        // A nonzero exit code here is our OWN terminal-result-cleanup SIGTERM of a
+        // lingering unmanaged background task, fired AFTER the adapter emitted a
+        // successful terminal result (errorMessage is null ⇒ the adapter classified
+        // the run as succeeded). The run's work completed; do not flip it to failed
+        // on the teardown signal alone — that discards a good result and triggers a
+        // spurious recovery cascade (see the CEO-orchestration exit-143 case).
+        outcome = "succeeded";
       } else {
         outcome = "failed";
       }
