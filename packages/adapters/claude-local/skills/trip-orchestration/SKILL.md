@@ -1,36 +1,40 @@
 ---
 name: trip-orchestration
-description: Use when asked to plan, build, or substantially modify a trip/itinerary in TREK (or any long, verify-heavy build that mutates an external datastore). Orchestrates the work as bounded chunks delegated to a builder doer, with QA verifying each chunk against the datastore, iterating until a verification contract passes.
+description: Use when asked to plan, build, or substantially modify a trip/itinerary in TREK (or any long, verify-heavy build that mutates an external datastore). Orchestrates the work as bounded chunks delegated to a builder doer, verifying each chunk against the datastore yourself (deterministic checker; no separate verifier agent), iterating until a verification contract passes.
 ---
 
 # Trip Orchestration Playbook (CEO)
 
 You are the orchestrator, not the builder. Break a large itinerary task into **bounded
 chunks**, delegate each to a **builder doer** (an IronClaw agent with the `travel-planning`
-skill + TREK tools + the pooled KG), have **QA verify each chunk against TREK/the KG — never
-against the doer's own summary** — and iterate until a checklist passes. This exists because
+skill + TREK tools + the pooled KG), **verify each chunk against TREK/the KG yourself with the
+deterministic checker — never against the doer's own summary** — and iterate until a checklist
+passes. This exists because
 one-shot "build the whole trip" runs overflow and fail, and doer self-reports say "done"
 while hiding gaps (missing museums, stale titles, placeholder durations). Ground truth is the
 datastore.
 
-## Delegation targets (concrete agents, org "Prime") — roles are STRICT
-The builder and the verifier must be different agents, and the verifier must never build —
-otherwise "verification" is just the builder re-reading its own work. Enforce this split:
+## Delegation targets — there is exactly ONE place to send work
+The entire reason this stack exists is to run the token-heavy work on the FREE local model, not
+on Claude. That constraint is now structural, not advisory:
 
-- **Builder = `IronClaw (Researcher)` — the ONLY agent that MUTATES TREK.** Every TREK write
-  (create/update/assign/delete a place, notes, durations, budget, transport, accommodations)
-  goes here, as a child issue with `assigneeAgentId` = the Researcher. Paperclip wakes it; when
-  its child completes you are re-woken (`issue_children_completed`) — the loop self-drives. The
-  Researcher is a slow local model, so keep each chunk within its window (invariant #1).
-- **Verifier = `IronClaw (QA)` — READ-ONLY, never writes.** Delegate a verification child here
-  for the SUBJECTIVE layer a checker can't judge (is a dinner actually open that night? is pacing
-  humane? are prices sane?). Its `trip-verification` skill reads TREK and reports gaps. Use at
-  DESIGN sign-off and FINALIZE, not every chunk. QA reports findings; it does NOT fix them.
-- **You (CEO) run the deterministic structural check yourself** — after a build chunk:
-  `python3 /home/prime/tool-integrations/verify-trek-trip.py <tripId> --json` (exit 0 = pass,
-  1 = failures, anchored to place/day ids). Treat failures as blockers → next fix chunk to the
-  Researcher. No model needed for structure; ground truth is the datastore. You orchestrate and
-  verify; you do not hand-edit the trip yourself either.
+- **ALL execution goes to `IronClaw (Researcher)` (the local model).** Every TREK read and every
+  TREK write — create/update/assign/delete a place, notes, durations, budget, transport,
+  accommodations, research — is a child issue with `assigneeAgentId` = the Researcher. Paperclip
+  wakes it; when its child completes you are re-woken (`issue_children_completed`) — the loop
+  self-drives. (`IronClaw (Engineer)` / `(DevOps)` exist for non-travel work; for trips it's the
+  Researcher.)
+- **There is NO helper or verifier agent, and no fast Claude shortcut.** The old QA agent has been
+  RETIRED — it no longer exists. You have nothing to offload building to except the Researcher,
+  and you must not try to route around it. **If the Researcher is slow, the fix is a SMALLER,
+  well-scoped chunk (invariant #1) plus NARROW reads (see the chunk template) — never reassigning
+  the work to another agent, and never doing the write yourself.** Routing token-heavy work onto
+  Claude defeats the only reason this system exists.
+- **You verify STRUCTURALLY yourself, deterministically** — after a build chunk (and at finalize):
+  `python3 /home/prime/tool-integrations/verify-trek-trip.py <tripId> --json` (free, no model;
+  exit 0 = pass, 1 = failures, anchored to place/day ids). Treat failures as blockers → next fix
+  chunk to the Researcher. Ground truth is the datastore, and this check costs zero tokens. You
+  orchestrate and verify; you never hand-edit the trip yourself.
 
 ## Hard invariants (do not violate)
 1. **Decompose to the doer's throughput — this is the #1 failure mode.** The builder doer
@@ -42,7 +46,7 @@ otherwise "verification" is just the builder re-reading its own work. Enforce th
    "geocode 6 stops", "fix durations on a day"), delegate **ONE item per chunk**, sequentially.
    Never bundle multiple multi-call items into one chunk. When unsure, split smaller. One base,
    or one concern, or one item — per chunk.
-2. **Truth over report.** A chunk is "done" only when QA has re-read TREK/KG and the chunk's
+2. **Truth over report.** A chunk is "done" only when YOU have re-read TREK/KG (via the deterministic verifier) and the chunk's
    verification contract passes. The doer's `status` ("failed"/"completed") and prose summary
    are UNTRUSTED — heavy runs report "failed" while their writes landed, and "completed" while
    incomplete.
@@ -67,14 +71,15 @@ otherwise "verification" is just the builder re-reading its own work. Enforce th
    a. Delegate the bounded chunk to `IronClaw (Researcher)` (explicit "do ONLY this").
    b. **Verify against the datastore** — when the child completes and re-wakes you, run
       `verify-trek-trip.py <tripId> --json` yourself (deterministic; never trust the doer's
-      summary). At DESIGN/FINALIZE also delegate the subjective judgment pass to `IronClaw (QA)`.
+      summary). Any subjective-quality judgment (is the dinner good? pacing humane?) you make
+      yourself at DESIGN/FINALIZE — there is no separate verifier agent.
    c. If failures → delegate a targeted fix chunk for exactly those gaps; re-verify. Max ~3 fix
       cycles per chunk before escalating to the user.
 6. **FINALIZE** — run a full-trip verification pass; your summary to the user must match what an
    independent datastore read shows (no claim/evidence drift). Then stop.
 
-## Verification contracts (what QA checks against TREK — see CONTRACTS.md)
-Each chunk type has a checklist. QA asserts these against `get_trip_summary` / `list_places` /
+## Verification contracts (what YOUR deterministic check asserts against TREK — see CONTRACTS.md)
+Each chunk type has a checklist. Your check (verify-trek-trip.py + a read) asserts these against `get_trip_summary` / `list_places` /
 etc., NOT the doer's message. Summary of the key ones (full detail in CONTRACTS.md):
 - **Base leg:** every day in the base's span has 2–4 stops, each categorized, geocoded
   (lat/lng), with a realistic (non-placeholder-60) duration and a price where relevant; no
@@ -107,10 +112,11 @@ between a chunk finishing in ~30s and hitting the 600s wall.
   chunk + verify is enough — don't over-orchestrate.
 
 ## Anti-rationalizations
-- "The Researcher is slow, so I'll delegate the write to QA (it's faster)" → NO. QA is the
-  verifier; if it also builds, verification becomes self-review and independence is lost. All
-  writes go to the Researcher — keep each chunk small enough to fit its window instead.
-- "The doer said it's done" → not done until you (or QA) read the datastore. Verify.
+- "The Researcher is slow, so I'll route this to a faster agent / just do it myself" → there is
+  NO faster agent (QA is retired) and you do NOT build yourself. Slowness is solved by a smaller,
+  narrower-read chunk, not by moving token-heavy work onto Claude — which is the one thing this
+  whole system exists to avoid.
+- "The doer said it's done" → not done until YOU read the datastore. Verify.
 - "I'll just have one agent build the whole trip" → it will overflow. Decompose.
 - "Run the chunks in parallel to go faster" → they contend on the one model and time out. Sequential.
 - "The self-report lists everything" → self-reports list *changes*, and miss omissions (a museum
