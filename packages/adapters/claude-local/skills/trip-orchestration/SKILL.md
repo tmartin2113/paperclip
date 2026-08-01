@@ -87,10 +87,18 @@ etc., NOT the doer's message. Summary of the key ones (full detail in CONTRACTS.
 - **Pacing (finalize):** no empty days, no >~5-stop marathons; each day a coherent 2–4-stop rhythm.
 
 ## Delegating a chunk (template)
-> SCOPED TASK — do ONLY <one base / one concern>, then stop. Do NOT touch <everything else>.
-> First `get_trip_summary` + `list_places`. Then <specific adds/moves>, reusing existing
-> places (no duplicates), geocoded via `search_place`, each categorized + realistic duration +
-> price. Report what you changed. Quote any tool error verbatim.
+> SCOPED TASK — do ONLY <one base / one concern / one item>, then stop. Do NOT touch <everything else>.
+> READ NARROWLY: `trek_list_places` for ONLY <the dayId(s) in scope>, or read the specific
+> place ids <ids>. Do NOT call `trek_get_trip_summary` — it returns ~130KB and re-prefills every
+> turn on the slow local model, which times the doer out. Then <specific adds/moves>, reusing
+> existing places (no duplicates), geocoded via `search_place`, each categorized + realistic
+> duration + price. Report what you changed. Quote any tool error verbatim.
+
+**Feed the doer the ids it needs so it never has to read the whole trip.** You already know the
+trip structure (you read it once at FRAME); put the concrete `dayId`s / `place_id`s for the chunk
+directly in the brief. A doer that has the ids does a few-KB targeted read; a doer that has to
+discover them calls `get_trip_summary` (~130KB) and times out. Scoped reads are the difference
+between a chunk finishing in ~30s and hitting the 600s wall.
 
 ## Escalation & bounds
 - Cap total chunks and per-chunk fix cycles; if a chunk can't pass its contract in ~3 tries,
