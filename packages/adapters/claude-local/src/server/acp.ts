@@ -30,6 +30,7 @@ import type {
   AcpxRemoteManagedHomeResult,
 } from "@paperclipai/adapter-utils/acpx-engine/execute";
 import {
+  asBoolean,
   asNumber,
   asString,
   parseObject,
@@ -77,6 +78,27 @@ export async function resolveClaudeExecutionEngineForRun(
   input: ClaudeEngineResolutionInput,
 ): Promise<ClaudeEngineSelection> {
   const selection = normalizeEngine(input.config.engine);
+  // Orchestrator-restricted agents (the fenced CEO) MUST run on the Claude CLI
+  // path: that is the only engine that enforces `--allowedTools`/strict-MCP
+  // confinement. The ACP path is approve-all and cannot confine, so allowing a
+  // restricted agent onto it would silently hand it full Bash/network/write
+  // access. Force CLI here regardless of the `engine` key, so the fence cannot be
+  // bypassed by clearing/blanking `engine` in adapter_config. Mirrors the
+  // filesystem/network scope handling below.
+  if (asBoolean(input.config.orchestratorRestricted, false)) {
+    if (selection.explicit && selection.engine === "acp") {
+      throw new Error(
+        "orchestratorRestricted agents require the Claude CLI engine; the ACP engine cannot enforce tool confinement.",
+      );
+    }
+    return {
+      engine: "cli",
+      explicit: selection.explicit,
+      ...(!selection.explicit
+        ? { fallbackReason: "orchestratorRestricted requires --allowedTools confinement, which only the CLI engine provides." }
+        : {}),
+    };
+  }
   const filesystemScope = parseLocalProcessFilesystemScope(input.config.filesystemScope);
   const networkScope = parseLocalProcessNetworkScope(input.config.networkScope);
   if (filesystemScope || networkScope) {
