@@ -8908,7 +8908,13 @@ export function issueRoutes(
       if (becameTerminal) {
         await destroyReusableSandboxLeasesForTerminalIssue(issue);
       }
-      if (becameTerminal && issue.parentId) {
+      // Re-wake the parent when a child SETTLES — including into `blocked` — so a
+      // write-landed-but-blocked child cannot silently stall the parent (see the service
+      // gate). Kept separate from `becameTerminal` so sandbox-lease cleanup stays done/cancelled-only.
+      const becameParentWakeable =
+        !["done", "cancelled", "blocked"].includes(existing.status) &&
+        ["done", "cancelled", "blocked"].includes(issue.status);
+      if (becameParentWakeable && issue.parentId) {
         const parent = await svc.getWakeableParentAfterChildCompletion(issue.parentId);
         if (parent) {
           addWakeup(parent.assigneeAgentId, {
@@ -10438,7 +10444,12 @@ export function issueRoutes(
       if (becameTerminal) {
         await destroyReusableSandboxLeasesForTerminalIssue(currentIssue);
       }
-      if (becameTerminal && currentIssue.parentId) {
+      // See the other call site: also re-wake the parent when a child settles into `blocked`,
+      // so a blocked child can't silently stall the parent. Separate from sandbox cleanup.
+      const becameParentWakeable =
+        !["done", "cancelled", "blocked"].includes(issueBeforeCommentDecision.status) &&
+        ["done", "cancelled", "blocked"].includes(currentIssue.status);
+      if (becameParentWakeable && currentIssue.parentId) {
         const parent = await svc.getWakeableParentAfterChildCompletion(currentIssue.parentId);
         if (parent) {
           addWakeup(parent.assigneeAgentId, {

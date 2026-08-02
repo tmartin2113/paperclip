@@ -5840,7 +5840,14 @@ export function issueService(db: Db) {
         .where(and(eq(issues.companyId, parent.companyId), eq(issues.parentId, parentIssueId)))
         .orderBy(asc(issues.issueNumber), asc(issues.createdAt));
       if (children.length === 0) return null;
-      if (!children.every((child) => child.status === "done" || child.status === "cancelled")) {
+      // Treat `blocked` as a settled state for the purpose of re-waking the parent: a child
+      // that stops in `blocked` (write may have landed but was reported/misclassified non-done)
+      // must still wake the parent, or the parent silently stalls waiting for a `done` that never
+      // comes. The woken parent assesses via its wake protocol (verify the datastore; close if the
+      // change is actually present, else handle/escalate the block).
+      if (!children.every(
+        (child) => child.status === "done" || child.status === "cancelled" || child.status === "blocked",
+      )) {
         return null;
       }
 
