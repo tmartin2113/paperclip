@@ -71,6 +71,32 @@ on Claude. That constraint is now structural, not advisory:
 5. **Bounded blast radius.** Every chunk brief says "do ONLY this; do NOT touch <other bases /
    accommodations / budget / …>". Scope creep between chunks corrupts prior work.
 
+## Wake protocol — SHORT idempotent bursts (READ THIS FIRST, it governs everything below)
+You do NOT sit in one long run polling a doer. Paperclip re-wakes you (`issue_children_completed`)
+each time a child finishes, so **every run must be SHORT and IDEMPOTENT.** On EVERY wake, before
+anything else, ASSESS STATE — do not re-derive from scratch and do not assume you've done nothing:
+1. `paperclip_get_issue(thisIssueId)` → read your EXISTING children + their statuses.
+2. `trek_verify(tripId)` / `trek_read` → read the CURRENT datastore. Is the requested change
+   ALREADY present?
+3. Then branch:
+   - **Change already landed** (a prior child did it — confirmed by trek_verify/trek_read): do NOT
+     delegate again. Post ONE closing comment with the datastore before/after, `paperclip_set_status`
+     **done**, STOP.
+   - **A write child is still `in_progress`/`in_review`**: do nothing, END your run. You'll be
+     re-woken when it completes. Do NOT create another child. Do NOT poll it in-run.
+   - **No child has done the work yet**: delegate EXACTLY ONE write child (see the template), post a
+     one-line "delegated to Researcher, awaiting" comment, END your run.
+
+Each run should be a handful of tool calls. **A long poll-in-run burst overlaps the next wake and
+gets preempted (wasted Claude $$); a redundant child re-does work the local model already did.** One
+write per change, delegate-and-exit, converge on a later wake.
+
+### Verification is NEVER a child — do it yourself
+`trek_verify`/`trek_read` are free, instant, and run inside YOUR run. **Never spawn a read-only /
+"audit" / "double-check" doer** to inspect another doer's write — that's a second slow local run +
+another wake for zero benefit. The ONLY reason to create a child is a datastore CHANGE you cannot
+make yourself. If you just need to KNOW the current state, call trek_verify/trek_read.
+
 ## The loop
 1. **FRAME** — parse destination, dates, travelers, constraints, vibe. `kg_query` for existing
    research on the destination.
@@ -81,14 +107,17 @@ on Claude. That constraint is now structural, not advisory:
 4. **PLAN CHUNKS** — enumerate the chunk list, each one base or one concern:
    `[per-base leg]×N → accommodations → budget → transport → dining(per base) → durations → notes sweep`.
    Record it as a checklist / subtasks so you can track done-vs-pending.
-5. **BUILD + VERIFY loop** — for each chunk, in order:
-   a. Delegate the bounded chunk to `IronClaw (Researcher)` (explicit "do ONLY this").
-   b. **Verify against the datastore** — when the child completes and re-wakes you, run
-      `trek_verify(tripId)` (deterministic; never trust the doer's
-      summary). Any subjective-quality judgment (is the dinner good? pacing humane?) you make
-      yourself at DESIGN/FINALIZE — there is no separate verifier agent.
-   c. If failures → delegate a targeted fix chunk for exactly those gaps; re-verify. Max ~3 fix
-      cycles per chunk before escalating to the user.
+5. **BUILD + VERIFY loop** — per the Wake protocol above, ONE chunk in flight at a time:
+   a. Delegate the bounded chunk to `IronClaw (Researcher)` (explicit "do ONLY this"), post a
+      one-line "delegated, awaiting" note, then **END your run** (delegate-and-exit — do NOT poll).
+   b. **On the completion re-wake, verify against the datastore YOURSELF** — run
+      `trek_verify(tripId)` / `trek_read` (deterministic; never trust the doer's summary, never
+      spawn an audit doer). Any subjective-quality judgment (is the dinner good? pacing humane?) you
+      make yourself at DESIGN/FINALIZE — there is no separate verifier agent.
+   c. If the change is present → move to the next chunk (or FINALIZE + close if it was the last).
+      If it's genuinely absent/wrong → delegate ONE targeted fix chunk for exactly that gap;
+      re-verify on the next wake. Max ~3 fix cycles per chunk before escalating to the user.
+      NEVER re-delegate a change that trek_verify shows already landed.
 6. **FINALIZE** — run a full-trip verification pass; your summary to the user must match what an
    independent datastore read shows (no claim/evidence drift). Then stop.
 
@@ -135,3 +164,10 @@ between a chunk finishing in ~30s and hitting the 600s wall.
 - "Run the chunks in parallel to go faster" → they contend on the one model and time out. Sequential.
 - "The self-report lists everything" → self-reports list *changes*, and miss omissions (a museum
   never added won't appear as a deletion). Check the full state at finalize.
+- "I got re-woken, I'll delegate the write again to be safe" → NO. First `trek_verify`/`trek_read`.
+  If the change is already in the datastore, a prior child did it — verify and CLOSE. Re-delegating
+  re-does finished work and churns extra runs + wakes.
+- "I'll spawn a read-only doer to audit the write" → NO. `trek_verify`/`trek_read` yourself — free,
+  instant, in your own run. A child is ONLY for a change you can't make yourself.
+- "I'll keep this run open and poll the child until it finishes" → NO. Delegate-and-exit. Long runs
+  overlap the next wake and get preempted (wasted Claude cost). You are re-woken on completion.
