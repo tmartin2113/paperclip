@@ -1474,10 +1474,25 @@ export function LiveUpdatesProvider({ children }: { children: ReactNode }) {
     };
     document.addEventListener("visibilitychange", onVisibilityChange);
 
+    // Safety-net reconcile. The WS delivers sub-second updates when an event
+    // fires, but some changes never produce a live event — most notably state
+    // written out-of-band (direct DB/admin edits), plus any event dropped
+    // while connected. Those otherwise persist until a manual refresh. A modest
+    // periodic reconcile, only while the tab is foregrounded, caps staleness
+    // regardless of source without spamming a hidden tab. Events still drive the
+    // instant path; this is the ceiling, not the primary channel.
+    const SAFETY_RECONCILE_MS = 15000;
+    const safetyTimer = window.setInterval(() => {
+      if (closed) return;
+      if (document.visibilityState !== "visible") return;
+      reconcileCompanyLiveQueries(queryClient, liveCompanyId);
+    }, SAFETY_RECONCILE_MS);
+
     return () => {
       closed = true;
       window.clearTimeout(connectTimer);
       clearReconnect();
+      window.clearInterval(safetyTimer);
       document.removeEventListener("visibilitychange", onVisibilityChange);
       const activeSocket = socket;
       socket = null;
