@@ -115,6 +115,29 @@ import {
 const RUN_LOG_DEFAULT_LIMIT_BYTES = 256_000;
 const RUN_LOG_MAX_LIMIT_BYTES = 1024 * 1024;
 
+// ---------------------------------------------------------------------------
+// Local-only hiring policy.
+//
+// Hosted-Claude agents (adapterType `claude_local`, e.g. the Claude CEO) must
+// only bring on workers that run on-box, not more hosted-Claude seats. Left to
+// its own prompt the CEO repeatedly hired engineers (e.g. "TREK Data Engineer")
+// onto `claude_local`; this enforces the intended architecture deterministically
+// at the agent-creation layer: any agent CREATED/HIRED by a hosted-Claude actor
+// is coerced onto the local gateway adapter, inheriting a sibling local worker's
+// gateway connection settings. Board (human) actors are unrestricted.
+//
+// All three knobs are env-overridable so the policy can be widened/relaxed
+// without a code change.
+const LOCAL_HIRE_ENFORCED =
+  (process.env.PAPERCLIP_ENFORCE_LOCAL_HIRE ?? "true").toLowerCase() !== "false";
+const HOSTED_ACTOR_ADAPTER_TYPES = new Set(
+  (process.env.PAPERCLIP_HOSTED_ADAPTER_TYPES ?? "claude_local")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
+);
+const LOCAL_HIRE_ADAPTER = (process.env.PAPERCLIP_LOCAL_HIRE_ADAPTER ?? "ironclaw_gateway").trim();
+
 function readRunLogLimitBytes(value: unknown) {
   const parsed = Number(value ?? RUN_LOG_DEFAULT_LIMIT_BYTES);
   if (!Number.isFinite(parsed)) return RUN_LOG_DEFAULT_LIMIT_BYTES;
@@ -763,6 +786,51 @@ export function agentRoutes(
       throw forbidden("Agent key cannot access another company");
     }
     return actorAgent;
+  }
+
+  // Enforce the local-only hiring policy (see LOCAL_HIRE_* consts). When a
+  // hosted-Claude actor (the CEO) creates/hires an agent on any adapter other
+  // than the local gateway, coerce it onto the local adapter and inherit a
+  // sibling local worker's gateway connection settings. Mutates `input` in
+  // place; returns coercion info for audit logging (null when nothing changed).
+  async function enforceLocalHireForHostedActor(
+    companyId: string,
+    actorAgent: Awaited<ReturnType<typeof svc.getById>> | null,
+    input: { adapterType?: string | null; adapterConfig?: Record<string, unknown> | null },
+  ): Promise<{ requestedAdapter: string; coercedTo: string; clonedFrom: string } | null> {
+    if (!LOCAL_HIRE_ENFORCED) return null;
+    if (!actorAgent) return null; // human board member — unrestricted
+    if (!HOSTED_ACTOR_ADAPTER_TYPES.has(actorAgent.adapterType)) return null; // actor already local
+    const requestedAdapter = input.adapterType ?? "";
+    if (requestedAdapter === LOCAL_HIRE_ADAPTER) return null; // already targeting local
+
+    const sibling = await db
+      .select()
+      .from(agentsTable)
+      .where(
+        and(
+          eq(agentsTable.companyId, companyId),
+          eq(agentsTable.adapterType, LOCAL_HIRE_ADAPTER),
+        ),
+      )
+      .orderBy(desc(agentsTable.createdAt))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    if (!sibling) {
+      throw unprocessable(
+        `Agents hired by a ${actorAgent.adapterType} agent must run locally on the ` +
+          `${LOCAL_HIRE_ADAPTER} adapter, but this company has no ${LOCAL_HIRE_ADAPTER} ` +
+          `worker to inherit gateway settings from. Provision one local worker first ` +
+          `(or a human board member can create the agent with an explicit ${LOCAL_HIRE_ADAPTER} adapterConfig).`,
+      );
+    }
+
+    // Replace (not merge) the adapterConfig: a hosted-Claude adapterConfig
+    // (command/engine/cwd/instructions*) is meaningless for the gateway adapter.
+    // Role/name/instructions live on sibling fields of `input`, not here.
+    input.adapterType = LOCAL_HIRE_ADAPTER;
+    input.adapterConfig = { ...((sibling.adapterConfig ?? {}) as Record<string, unknown>) };
+    return { requestedAdapter: requestedAdapter || "(unspecified)", coercedTo: LOCAL_HIRE_ADAPTER, clonedFrom: sibling.id };
   }
 
   async function assertBoardCanManageAgentsForCompany(req: Request, companyId: string) {
@@ -1986,7 +2054,17 @@ export function agentRoutes(
     const result = await filterAgentsForActor(req, await svc.list(companyId));
     const canReadConfigs = await actorCanReadConfigurationsForCompany(req, companyId);
     if (canReadConfigs) {
-      res.json(result);
+      // Config-read is allowed to SEE the configuration, not the secrets inside
+      // it. Redact secret-bearing fields (e.g. an inline adapterConfig.token —
+      // previously served in cleartext here to any config-reading agent) while
+      // keeping every other field, matching the single-agent GET's redaction.
+      res.json(
+        result.map((agent) => ({
+          ...agent,
+          adapterConfig: redactEventPayload(agent.adapterConfig as Record<string, unknown>),
+          runtimeConfig: redactEventPayload(agent.runtimeConfig as Record<string, unknown>),
+        })),
+      );
       return;
     }
     res.json(result.map((agent) => redactForRestrictedAgentView(agent)));
@@ -2350,7 +2428,7 @@ export function agentRoutes(
 
   router.post("/companies/:companyId/agent-hires", validate(createAgentHireSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
-    await assertCanCreateAgentsForCompany(req, companyId);
+    const hireActorAgent = await assertCanCreateAgentsForCompany(req, companyId);
     const sourceIssueIds = parseSourceIssueIds(req.body);
     const {
       desiredSkills: requestedDesiredSkills,
@@ -2360,6 +2438,7 @@ export function agentRoutes(
       ...hireInput
     } = req.body;
     hireInput.adapterType = assertKnownAdapterType(hireInput.adapterType);
+    const hireLocalCoercion = await enforceLocalHireForHostedActor(companyId, hireActorAgent, hireInput);
     const rawHireAdapterConfig = (hireInput.adapterConfig ?? {}) as Record<string, unknown>;
     assertNoNewAgentLegacyPromptTemplate(
       hireInput.adapterType,
@@ -2499,6 +2578,7 @@ export function agentRoutes(
         approvalId: approval?.id ?? null,
         issueIds: sourceIssueIds,
         desiredSkills: desiredSkillAssignment.desiredSkills,
+        localHireCoercion: hireLocalCoercion,
       },
     });
     const telemetryClient = getTelemetryClient();
@@ -2532,7 +2612,7 @@ export function agentRoutes(
 
   router.post("/companies/:companyId/agents", validate(createAgentSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
-    await assertCanCreateAgentsForCompany(req, companyId);
+    const createActorAgent = await assertCanCreateAgentsForCompany(req, companyId);
 
     const company = await db
       .select()
@@ -2555,6 +2635,7 @@ export function agentRoutes(
       ...createInput
     } = req.body;
     createInput.adapterType = assertKnownAdapterType(createInput.adapterType);
+    const createLocalCoercion = await enforceLocalHireForHostedActor(companyId, createActorAgent, createInput);
     const rawCreateAdapterConfig = (createInput.adapterConfig ?? {}) as Record<string, unknown>;
     assertNoNewAgentLegacyPromptTemplate(
       createInput.adapterType,
@@ -2621,6 +2702,7 @@ export function agentRoutes(
         name: agent.name,
         role: agent.role,
         desiredSkills: desiredSkillAssignment.desiredSkills,
+        localHireCoercion: createLocalCoercion,
       },
     });
     const telemetryClient = getTelemetryClient();
