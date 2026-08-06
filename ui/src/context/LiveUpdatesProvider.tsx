@@ -911,6 +911,30 @@ function invalidateHeartbeatQueries(
   }
 }
 
+// Full re-sync of the company-level views that make up the dashboard/sidebar.
+// Called after a WebSocket RECONNECT: events that fired while the socket was
+// down (e.g. across a server restart) can't be replayed, so refetching only
+// `liveRuns` left the dashboard, agent list, issue lists, activity and badges
+// stale until a manual page refresh. Invalidating the whole company-level set
+// makes a reconnect fully reconcile the UI. Cheap: these are list/summary
+// queries and only fire on the (rare) reconnect path.
+function reconcileCompanyLiveQueries(
+  queryClient: ReturnType<typeof useQueryClient>,
+  companyId: string,
+) {
+  queryClient.invalidateQueries({ queryKey: queryKeys.liveRuns(companyId) });
+  queryClient.invalidateQueries({ queryKey: queryKeys.dashboard(companyId) });
+  queryClient.invalidateQueries({ queryKey: queryKeys.heartbeats(companyId) });
+  queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(companyId) });
+  queryClient.invalidateQueries({ queryKey: queryKeys.activity(companyId) });
+  queryClient.invalidateQueries({ queryKey: queryKeys.sidebarBadges(companyId) });
+  queryClient.invalidateQueries({ queryKey: queryKeys.costs(companyId) });
+  queryClient.invalidateQueries({ queryKey: queryKeys.issues.list(companyId) });
+  queryClient.invalidateQueries({ queryKey: queryKeys.issues.listMineByMe(companyId) });
+  queryClient.invalidateQueries({ queryKey: queryKeys.issues.listTouchedByMe(companyId) });
+  queryClient.invalidateQueries({ queryKey: queryKeys.issues.listUnreadTouchedByMe(companyId) });
+}
+
 function invalidateHeartbeatProgressQueries(
   queryClient: ReturnType<typeof useQueryClient>,
   _companyId: string,
@@ -1389,8 +1413,10 @@ export function LiveUpdatesProvider({ children }: { children: ReactNode }) {
         if (reconnectAttempt > 0) {
           gateRef.current.suppressUntil = Date.now() + RECONNECT_SUPPRESS_MS;
           // Reconcile after a gap: events missed while disconnected can't be
-          // replayed yet, so refetch the event-sourced live-runs list once.
-          queryClient.invalidateQueries({ queryKey: queryKeys.liveRuns(liveCompanyId) });
+          // replayed, so refetch the full set of company-level views (not just
+          // live-runs) so the dashboard/agents/issues re-sync without a manual
+          // page refresh.
+          reconcileCompanyLiveQueries(queryClient, liveCompanyId);
         }
         reconnectAttempt = 0;
       };
