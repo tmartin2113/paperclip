@@ -1457,10 +1457,28 @@ export function LiveUpdatesProvider({ children }: { children: ReactNode }) {
     // "WebSocket closed before connection established" dev-mode error.
     const connectTimer = window.setTimeout(connect, 0);
 
+    // Reconcile when the user returns to a backgrounded tab. Live events that
+    // arrive while the page is hidden are foreground-gated, and the
+    // event-sourced caches (liveRuns / agent status) aren't re-fetched on their
+    // own — so without this the dashboard can show agents still "working" after
+    // they finished, until a manual refresh. Only fires on the hidden->visible
+    // transition; the reconcile is idempotent and hits list/summary queries.
+    let wasHidden = document.visibilityState !== "visible";
+    const onVisibilityChange = () => {
+      if (closed) return;
+      const visibleNow = document.visibilityState === "visible";
+      if (visibleNow && wasHidden) {
+        reconcileCompanyLiveQueries(queryClient, liveCompanyId);
+      }
+      wasHidden = !visibleNow;
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
     return () => {
       closed = true;
       window.clearTimeout(connectTimer);
       clearReconnect();
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       const activeSocket = socket;
       socket = null;
       closeSocketQuietly(activeSocket, "provider_unmount");
