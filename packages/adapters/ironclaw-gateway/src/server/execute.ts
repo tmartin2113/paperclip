@@ -307,7 +307,7 @@ export async function execute(
   // runaway loop); `timeoutSec` now floors that backstop (min 1h), it is not a
   // tight cap. `abortReason` lets the catch block report which guard fired.
   let abortReason: "inactivity" | "wall" | null = null;
-  const wallBackstopSec = Math.max(timeoutSec, 3600);
+  const wallBackstopSec = Math.max(timeoutSec, 1800);
   // Silence window: the run aborts if the gateway sends NO data for this long —
   // a real hang, not slow-but-steady work. Declared here (not in the read loop)
   // so the catch block can name it. Generous enough to survive a long tool
@@ -416,33 +416,30 @@ export async function execute(
     // indistinguishable from a real one. Zero forwarded events => failure.
     let forwardedCount = 0;
 
-    // Inactivity timeout: if no data arrives for 30s, the stream is stalled and
-    // we should emit an error and abort. This catches hangs where the gateway
-    // accepts the request but Ollama is unresponsive.
-    let inactivityTimer = setTimeout(() => {
-      abortReason = "inactivity";
-      controller.abort();
-      // Emit diagnostic message before abort takes effect
-      ctx.onLog(
-        "stderr",
-        `[ironclaw-gateway] SSE stream inactivity timeout (${inactivitySec}s): no data received from gateway; Ollama may be unresponsive.\n`,
-      ).catch(() => {});
-    }, inactivitySec * 1000);
-
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-
-      // Reset inactivity timer on every read, even if value is empty
+    // Inactivity timeout: abort if no NEW event is forwarded for `inactivitySec`.
+    // Deliberately measured on real FORWARDED EVENTS, not raw reads — a stream
+    // that keeps the connection alive (SSE keep-alives / partial data) but stops
+    // producing usable events would reset a raw-read timer forever and hang to
+    // the wall backstop. That "did its work but never terminated the stream"
+    // shape is the actual 600s dispatch-then-hang failure; anchoring the timer
+    // to forwarded events catches it.
+    let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
+    const armInactivity = () => {
       clearTimeout(inactivityTimer);
       inactivityTimer = setTimeout(() => {
         abortReason = "inactivity";
         controller.abort();
         ctx.onLog(
           "stderr",
-          `[ironclaw-gateway] SSE stream inactivity timeout (${inactivitySec}s): no data received from gateway; Ollama may be unresponsive.\n`,
+          `[ironclaw-gateway] SSE stream inactivity timeout (${inactivitySec}s): no new events from the gateway — the run stalled or never terminated its stream after its last output.\n`,
         ).catch(() => {});
       }, inactivitySec * 1000);
+    };
+    armInactivity();
+
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
 
       buffer += decoder.decode(value, { stream: true });
       let sep: number;
@@ -477,6 +474,7 @@ export async function execute(
         }
         await forwardEvent(ctx, event);
         forwardedCount += 1;
+        armInactivity(); // progress made — reset the no-new-events watchdog
       }
     }
 
