@@ -104,6 +104,7 @@ const SUCCESSFUL_RUN_HANDOFF_VALID_PATH_SKIP_REASONS = new Set([
   "pending interaction or approval owns the next action",
   "persisted issue monitor owns the next action",
   "explicit blocker path owns the next action",
+  "delegated child issue owns the next action",
   "open recovery issue owns the ambiguity",
   "issue is under an active pause hold",
   "corrective handoff wake already exists for this source run",
@@ -458,6 +459,7 @@ export function decideSuccessfulRunHandoff(input: {
   hasPendingInteractionOrApproval: boolean;
   hasPersistedMonitor: boolean;
   hasExplicitBlockerPath: boolean;
+  hasActiveDelegatedChild: boolean;
   hasOpenRecoveryIssue: boolean;
   hasPauseHold: boolean;
   hasActiveRoutineContinuation: boolean;
@@ -500,6 +502,13 @@ export function decideSuccessfulRunHandoff(input: {
   }
   if (input.hasPersistedMonitor) return { kind: "skip", reason: "persisted issue monitor owns the next action" };
   if (input.hasExplicitBlockerPath) return { kind: "skip", reason: "explicit blocker path owns the next action" };
+  // A run that delegated to a child issue still open is a valid continuation
+  // path even when the parent wasn't formally blocked on it: the child owns the
+  // next action, and its completion re-wakes the parent via the
+  // issue_children_completed path. Without this, delegating-then-leaving-the-
+  // parent-in_progress was treated as a missing disposition and the parent got
+  // blocked on a recovery owner despite real progress.
+  if (input.hasActiveDelegatedChild) return { kind: "skip", reason: "delegated child issue owns the next action" };
   if (input.hasOpenRecoveryIssue) return { kind: "skip", reason: "open recovery issue owns the ambiguity" };
   if (input.hasPauseHold) return { kind: "skip", reason: "issue is under an active pause hold" };
   if (input.budgetBlocked) return { kind: "skip", reason: "budget hard stop blocks corrective wake" };

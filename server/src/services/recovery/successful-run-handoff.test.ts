@@ -57,6 +57,7 @@ function decide(overrides: Partial<Parameters<typeof decideSuccessfulRunHandoff>
     hasPendingInteractionOrApproval: false,
     hasPersistedMonitor: false,
     hasExplicitBlockerPath: false,
+    hasActiveDelegatedChild: false,
     hasOpenRecoveryIssue: false,
     hasPauseHold: false,
     hasActiveRoutineContinuation: false,
@@ -266,6 +267,17 @@ describe("successful run handoff decision", () => {
     expect(decide({ hasExplicitBlockerPath: true })).toEqual({
       kind: "skip",
       reason: "explicit blocker path owns the next action",
+    });
+  });
+
+  it("does not queue when the run delegated to an open child issue that owns the next action", () => {
+    // A run that spawned a child issue (even without a formal blocker link) has
+    // a valid continuation path — the child owns the next action and its
+    // completion re-wakes the parent. Previously this fell through to a missing
+    // disposition and blocked the parent on a recovery owner.
+    expect(decide({ hasActiveDelegatedChild: true })).toEqual({
+      kind: "skip",
+      reason: "delegated child issue owns the next action",
     });
   });
 
