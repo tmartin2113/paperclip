@@ -391,6 +391,12 @@ export async function execute(
     // on completion, the token usage.
     let usage: UsageSummary | undefined;
     let sessionId: string | undefined;
+    // Count events actually forwarded downstream. A stream that opens, sends
+    // nothing usable (only a [DONE] sentinel, or entirely unparseable data) and
+    // closes cleanly would otherwise take the success path below and report
+    // exitCode 0 with no work done — the "silent success" that makes a hung run
+    // indistinguishable from a real one. Zero forwarded events => failure.
+    let forwardedCount = 0;
 
     // Inactivity timeout: if no data arrives for 30s, the stream is stalled and
     // we should emit an error and abort. This catches hangs where the gateway
@@ -451,14 +457,31 @@ export async function execute(
           if (parsed) usage = parsed;
         }
         await forwardEvent(ctx, event);
+        forwardedCount += 1;
       }
     }
 
     clearTimeout(inactivityTimer);
 
+    // The stream closed cleanly but produced nothing to forward. Treat this as a
+    // failure (mirroring the timeout branch) rather than a silent success, so a
+    // run that did no work is not recorded as exitCode 0. Emit the reason first
+    // so the agent can see why.
+    if (forwardedCount === 0) {
+      const emptyMsg = `[ironclaw-gateway] SSE stream closed after forwarding 0 events: the gateway completed the response stream but produced no usable output. Check gateway logs for Ollama connectivity or a request that returned nothing.\n`;
+      await ctx.onLog("stderr", emptyMsg);
+      return {
+        exitCode: null,
+        signal: null,
+        timedOut: false,
+        errorMessage: emptyMsg.trim(),
+        errorCode: "ironclaw_gateway_empty_stream",
+      };
+    }
+
     await ctx.onLog(
       "stderr",
-      `[ironclaw-gateway] SSE stream completed successfully (${usage ? "with" : "without"} usage data)\n`,
+      `[ironclaw-gateway] SSE stream completed successfully (${forwardedCount} event${forwardedCount === 1 ? "" : "s"} forwarded, ${usage ? "with" : "without"} usage data)\n`,
     );
 
     return {
