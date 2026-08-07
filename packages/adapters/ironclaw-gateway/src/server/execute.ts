@@ -431,7 +431,7 @@ export async function execute(
         controller.abort();
         ctx.onLog(
           "stderr",
-          `[ironclaw-gateway] SSE stream inactivity timeout (${inactivitySec}s): no new events from the gateway — the run stalled or never terminated its stream after its last output.\n`,
+          `[ironclaw-gateway] SSE stream inactivity timeout (${inactivitySec}s): no data received from the gateway for the window; the gateway or Ollama is unresponsive.\n`,
         ).catch(() => {});
       }, inactivitySec * 1000);
     };
@@ -440,6 +440,16 @@ export async function execute(
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
+
+      // Reset on ANY inbound data (including SSE keep-alives/partial frames),
+      // not just forwarded events. A prefill-bound worker turn is event-silent
+      // for a long time before its first token but the connection is not idle;
+      // resetting only on forwarded events false-aborted those turns at the
+      // window. The "did its work but never terminated the stream" case that
+      // motivated event-only reset is now handled at the source — the engine
+      // always emits a terminal AppEvent::Response on completion — so this
+      // watchdog only needs to catch a truly dead (no bytes at all) stream.
+      armInactivity();
 
       buffer += decoder.decode(value, { stream: true });
       let sep: number;
@@ -474,7 +484,6 @@ export async function execute(
         }
         await forwardEvent(ctx, event);
         forwardedCount += 1;
-        armInactivity(); // progress made — reset the no-new-events watchdog
       }
     }
 
