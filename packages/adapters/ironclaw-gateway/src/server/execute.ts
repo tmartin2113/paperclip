@@ -298,7 +298,25 @@ export async function execute(
       : {};
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutSec * 1000);
+  // The run is bounded by INACTIVITY (the watchdog in the read loop aborts if
+  // the gateway goes silent), NOT by total wall-clock time. A legitimately long
+  // run that keeps producing output — e.g. a large multi-venue write chunk —
+  // must not be killed merely for taking a while, which is exactly what a tight
+  // `timeoutSec` wall did (it wall-clocked productive runs at 600s). This timer
+  // is only a generous absolute backstop against a stream that never ends (a
+  // runaway loop); `timeoutSec` now floors that backstop (min 1h), it is not a
+  // tight cap. `abortReason` lets the catch block report which guard fired.
+  let abortReason: "inactivity" | "wall" | null = null;
+  const wallBackstopSec = Math.max(timeoutSec, 3600);
+  // Silence window: the run aborts if the gateway sends NO data for this long —
+  // a real hang, not slow-but-steady work. Declared here (not in the read loop)
+  // so the catch block can name it. Generous enough to survive a long tool
+  // execution between events (a 30s window false-aborted write-heavy runs).
+  const inactivitySec = 120;
+  const timer = setTimeout(() => {
+    abortReason = "wall";
+    controller.abort();
+  }, wallBackstopSec * 1000);
 
   // Log request details for debugging gateway hangs
   await ctx.onLog(
@@ -401,8 +419,8 @@ export async function execute(
     // Inactivity timeout: if no data arrives for 30s, the stream is stalled and
     // we should emit an error and abort. This catches hangs where the gateway
     // accepts the request but Ollama is unresponsive.
-    const inactivitySec = 30;
     let inactivityTimer = setTimeout(() => {
+      abortReason = "inactivity";
       controller.abort();
       // Emit diagnostic message before abort takes effect
       ctx.onLog(
@@ -418,6 +436,7 @@ export async function execute(
       // Reset inactivity timer on every read, even if value is empty
       clearTimeout(inactivityTimer);
       inactivityTimer = setTimeout(() => {
+        abortReason = "inactivity";
         controller.abort();
         ctx.onLog(
           "stderr",
@@ -495,15 +514,24 @@ export async function execute(
     };
   } catch (err) {
     if (controller.signal.aborted) {
-      // Emit error message before returning so agent sees why run timed out.
-      const timedOutMsg = `[ironclaw-gateway] SSE stream timeout after ${timeoutSec}s: gateway accepted request but never completed the response stream. Check gateway logs for Ollama connectivity or request hangs.\n`;
+      // Report which guard fired. Inactivity = a real hang (gateway went silent);
+      // wall = the absolute backstop (a stream that kept producing but never
+      // ended). Both are failures, but they mean different things and a
+      // legitimately long-but-productive run no longer trips a tight wall.
+      const timedOutMsg =
+        abortReason === "inactivity"
+          ? `[ironclaw-gateway] SSE stream inactivity abort: gateway sent no data for ${inactivitySec}s (accepted the request but stopped streaming). Check gateway logs for Ollama connectivity or a request hang.\n`
+          : `[ironclaw-gateway] SSE stream hit the ${wallBackstopSec}s absolute backstop while still streaming — the run never terminated (possible runaway loop).\n`;
       await ctx.onLog("stderr", timedOutMsg);
       return {
         exitCode: null,
         signal: null,
         timedOut: true,
         errorMessage: timedOutMsg.trim(),
-        errorCode: "ironclaw_gateway_timeout",
+        errorCode:
+          abortReason === "inactivity"
+            ? "ironclaw_gateway_inactivity"
+            : "ironclaw_gateway_wall_timeout",
       };
     }
     // A transport error (connection refused, DNS, reset) is usually transient —
