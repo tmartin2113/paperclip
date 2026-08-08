@@ -306,13 +306,24 @@ export async function execute(
   // is only a generous absolute backstop against a stream that never ends (a
   // runaway loop); `timeoutSec` now floors that backstop (min 1h), it is not a
   // tight cap. `abortReason` lets the catch block report which guard fired.
-  let abortReason: "inactivity" | "wall" | null = null;
+  let abortReason: "inactivity" | "event_silence" | "wall" | null = null;
   const wallBackstopSec = Math.max(timeoutSec, 1800);
-  // Silence window: the run aborts if the gateway sends NO data for this long —
-  // a real hang, not slow-but-steady work. Declared here (not in the read loop)
-  // so the catch block can name it. Generous enough to survive a long tool
+  // Silence window: the run aborts if the gateway sends NO data (raw bytes) for
+  // this long — a truly dead connection. Declared here (not in the read loop) so
+  // the catch block can name it. Generous enough to survive a long tool
   // execution between events (a 30s window false-aborted write-heavy runs).
   const inactivitySec = 120;
+  // Event-silence window (separate from raw-byte silence): abort if no real SSE
+  // EVENT is forwarded for this long even while raw bytes keep arriving. The
+  // gateway can trickle keep-alives/partial frames while an agent turn has
+  // actually hung without ever emitting a terminal `response.completed` — that is
+  // the 41×600s "2 events then hang to the gateway's own ~600s close" failure the
+  // stack-check found (PRI-193). The raw-byte timer above never fires there
+  // because keep-alives keep resetting it. This window is deliberately WIDE (well
+  // above worst-case reasoning-on thinking, observed ~24s) so it cannot re-create
+  // the prefill false-aborts that a tight event-timer caused earlier — it only
+  // catches a stream that has clearly stalled, well before the ~600s dead-end.
+  const eventSilenceSec = 360;
   const timer = setTimeout(() => {
     abortReason = "wall";
     controller.abort();
@@ -415,14 +426,25 @@ export async function execute(
     // exitCode 0 with no work done — the "silent success" that makes a hung run
     // indistinguishable from a real one. Zero forwarded events => failure.
     let forwardedCount = 0;
+    // Count COMPLETED tool (function) calls to tell a run that actually acted
+    // from one that only produced text. A write-briefed run that ends with zero
+    // tool calls narrated a change it never executed — the reasoning-light doer
+    // failure. Gated by `writeIntent` so read/analysis briefs are unaffected.
+    // See the guard after the read loop. Intent is read from the issue brief
+    // (`taskContextNote`), NOT the full `input` — the prompt template and env
+    // block carry boilerplate verbs ("update the issue…") that would make every
+    // run look like a write.
+    let toolCallCount = 0;
+    const writeIntent = briefRequestsWrite(taskContextNote);
 
-    // Inactivity timeout: abort if no NEW event is forwarded for `inactivitySec`.
-    // Deliberately measured on real FORWARDED EVENTS, not raw reads — a stream
-    // that keeps the connection alive (SSE keep-alives / partial data) but stops
-    // producing usable events would reset a raw-read timer forever and hang to
-    // the wall backstop. That "did its work but never terminated the stream"
-    // shape is the actual 600s dispatch-then-hang failure; anchoring the timer
-    // to forwarded events catches it.
+    // Two independent silence watchdogs (either firing aborts the run):
+    //  - inactivityTimer: no RAW BYTES for `inactivitySec` → a dead connection.
+    //  - eventSilenceTimer: no forwarded EVENT for `eventSilenceSec` even while
+    //    raw bytes trickle → a stalled agent turn (keep-alives mask it from the
+    //    raw timer). This is the PRI-193 hang the stack-check found. The event
+    //    window is much wider than the raw one specifically so a prefill-bound
+    //    turn (long thinking before the first token, but well under 360s) is not
+    //    false-aborted — the mistake an earlier tight event-timer made.
     let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
     const armInactivity = () => {
       clearTimeout(inactivityTimer);
@@ -435,7 +457,20 @@ export async function execute(
         ).catch(() => {});
       }, inactivitySec * 1000);
     };
+    let eventSilenceTimer: ReturnType<typeof setTimeout> | undefined;
+    const armEventSilence = () => {
+      clearTimeout(eventSilenceTimer);
+      eventSilenceTimer = setTimeout(() => {
+        abortReason = "event_silence";
+        controller.abort();
+        ctx.onLog(
+          "stderr",
+          `[ironclaw-gateway] SSE event-silence timeout (${eventSilenceSec}s): the gateway kept the connection alive but forwarded no new event — the agent turn has stalled without terminating the response (it produced output but never emitted response.completed). Failing now instead of hanging to the gateway's ~600s dead-end.\n`,
+        ).catch(() => {});
+      }, eventSilenceSec * 1000);
+    };
     armInactivity();
+    armEventSilence();
 
     for (;;) {
       const { value, done } = await reader.read();
@@ -484,10 +519,13 @@ export async function execute(
         }
         await forwardEvent(ctx, event);
         forwardedCount += 1;
+        armEventSilence(); // real progress — reset the event-silence watchdog
+        if (isToolCallCompletion(event)) toolCallCount += 1;
       }
     }
 
     clearTimeout(inactivityTimer);
+    clearTimeout(eventSilenceTimer);
 
     // The stream closed cleanly but produced nothing to forward. Treat this as a
     // failure (mirroring the timeout branch) rather than a silent success, so a
@@ -505,9 +543,29 @@ export async function execute(
       };
     }
 
+    // Write-briefed but never acted: the brief asked to change data, the stream
+    // produced text but ZERO completed tool calls. This is the "narrated a write
+    // but never executed it" failure — a reasoning-light doer describing the
+    // change and ending its turn, which the CEO could previously only catch via
+    // DB forensics. Fail rather than record a phantom success (mirroring the
+    // empty-stream guard above) so the delegated issue is retried instead of
+    // marked done while nothing was written. Read/analysis briefs
+    // (writeIntent=false) are not gated; they legitimately make no tool calls.
+    if (writeIntent && toolCallCount === 0) {
+      const noToolMsg = `[ironclaw-gateway] run was briefed as a write/change task but made 0 tool calls across ${forwardedCount} forwarded event${forwardedCount === 1 ? "" : "s"} (text-only). The model described the change without executing it; failing the run so it is retried rather than recorded as a phantom success.\n`;
+      await ctx.onLog("stderr", noToolMsg);
+      return {
+        exitCode: null,
+        signal: null,
+        timedOut: false,
+        errorMessage: noToolMsg.trim(),
+        errorCode: "ironclaw_gateway_no_tool_calls_on_write",
+      };
+    }
+
     await ctx.onLog(
       "stderr",
-      `[ironclaw-gateway] SSE stream completed successfully (${forwardedCount} event${forwardedCount === 1 ? "" : "s"} forwarded, ${usage ? "with" : "without"} usage data)\n`,
+      `[ironclaw-gateway] SSE stream completed successfully (${forwardedCount} event${forwardedCount === 1 ? "" : "s"} forwarded, ${toolCallCount} tool call${toolCallCount === 1 ? "" : "s"}, ${usage ? "with" : "without"} usage data)\n`,
     );
 
     return {
@@ -521,24 +579,31 @@ export async function execute(
     };
   } catch (err) {
     if (controller.signal.aborted) {
-      // Report which guard fired. Inactivity = a real hang (gateway went silent);
-      // wall = the absolute backstop (a stream that kept producing but never
-      // ended). Both are failures, but they mean different things and a
-      // legitimately long-but-productive run no longer trips a tight wall.
-      const timedOutMsg =
-        abortReason === "inactivity"
-          ? `[ironclaw-gateway] SSE stream inactivity abort: gateway sent no data for ${inactivitySec}s (accepted the request but stopped streaming). Check gateway logs for Ollama connectivity or a request hang.\n`
-          : `[ironclaw-gateway] SSE stream hit the ${wallBackstopSec}s absolute backstop while still streaming — the run never terminated (possible runaway loop).\n`;
+      // Report which guard fired. inactivity = dead connection (no raw bytes);
+      // event_silence = a stalled agent turn (bytes trickle but no new event,
+      // never terminated the response — the PRI-193 hang, caught well before the
+      // gateway's ~600s dead-end); wall = the absolute backstop. All are failures
+      // but mean different things, and a legitimately long-but-productive run no
+      // longer trips a tight wall.
+      let timedOutMsg: string;
+      let timeoutCode: string;
+      if (abortReason === "inactivity") {
+        timedOutMsg = `[ironclaw-gateway] SSE stream inactivity abort: gateway sent no data for ${inactivitySec}s (accepted the request but stopped streaming). Check gateway logs for Ollama connectivity or a request hang.\n`;
+        timeoutCode = "ironclaw_gateway_inactivity";
+      } else if (abortReason === "event_silence") {
+        timedOutMsg = `[ironclaw-gateway] SSE event-silence abort: gateway kept the connection alive but forwarded no new event for ${eventSilenceSec}s — the agent turn stalled without emitting response.completed. Failing fast instead of hanging to the gateway's ~600s dead-end.\n`;
+        timeoutCode = "ironclaw_gateway_event_silence";
+      } else {
+        timedOutMsg = `[ironclaw-gateway] SSE stream hit the ${wallBackstopSec}s absolute backstop while still streaming — the run never terminated (possible runaway loop).\n`;
+        timeoutCode = "ironclaw_gateway_wall_timeout";
+      }
       await ctx.onLog("stderr", timedOutMsg);
       return {
         exitCode: null,
         signal: null,
         timedOut: true,
         errorMessage: timedOutMsg.trim(),
-        errorCode:
-          abortReason === "inactivity"
-            ? "ironclaw_gateway_inactivity"
-            : "ironclaw_gateway_wall_timeout",
+        errorCode: timeoutCode,
       };
     }
     // A transport error (connection refused, DNS, reset) is usually transient —
@@ -648,6 +713,41 @@ async function maybeEmitFileEdit(
       timestamp: new Date().toISOString(),
     },
   });
+}
+
+/**
+ * True when the run's task prompt is an imperative request to CHANGE data
+ * (assign, update, create, move, delete, …) rather than answer a question.
+ * Gates the "made zero tool calls" safety net below: a write-briefed run that
+ * produced only prose and never called a tool narrated a change it never
+ * executed — the reasoning-light doer failure this stack hit repeatedly. Pure
+ * read/analysis/answer briefs legitimately make zero tool calls and are NOT
+ * gated.
+ *
+ * Deliberately conservative and high-precision — word-boundary match on
+ * imperative mutation verbs. A false positive only forces a retry (never data
+ * loss); a false negative just preserves the prior behavior. Erring toward
+ * matching is the safe direction.
+ */
+function briefRequestsWrite(input: string): boolean {
+  return /\b(assign|reassign|unassign|update|create|write|insert|add|append|move|delete|remove|set|patch|edit|rename|replace|fix|change|modify)\b/i.test(
+    input,
+  );
+}
+
+/**
+ * True for the SSE event that marks a COMPLETED tool (function) call. Counted
+ * once per call (on the `.done` item, not the incremental argument deltas) to
+ * tell a run that actually acted from one that only produced text. Mirrors the
+ * function-call discriminator in `maybeEmitFileEdit`.
+ */
+function isToolCallCompletion(event: Record<string, unknown>): boolean {
+  if (event.type !== "response.output_item.done") return false;
+  const item =
+    event.item && typeof event.item === "object"
+      ? (event.item as Record<string, unknown>)
+      : null;
+  return !!item && item.type === "function_call";
 }
 
 /**

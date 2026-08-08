@@ -298,6 +298,12 @@ const INTERACTION_CONTINUATION_REQUEUE_MAX_ATTEMPTS = 3;
 
 const CONTINUATION_RECOVERY_TRANSIENT_MAX_ATTEMPTS = 3;
 const CONTINUATION_RECOVERY_DEFAULT_MAX_ATTEMPTS = 1;
+// Convergence backstop for terminal failures whose error code is handled by neither
+// the non-retryable set nor the automatic-recovery (adapter_failed/provider_quota)
+// path — e.g. `ironclaw_gateway_no_tool_calls_on_write`. Without a cap here these fell
+// straight through to unbounded re-dispatch (the 41×600s loop of 2026-08-08). 3 gives a
+// reasoning-light doer a couple of chances to recover, then blocks for intervention.
+const CONTINUATION_RECOVERY_UNCLASSIFIED_MAX_ATTEMPTS = 3;
 const CONTINUATION_RECOVERY_TRANSIENT_BASE_BACKOFF_MS = 60_000;
 export const PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS = 60 * 60 * 1000;
 
@@ -4082,6 +4088,45 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
               result.skipped += 1;
               continue;
             }
+          }
+        } else {
+          // General convergence backstop (PRI-193): a terminal failure whose error
+          // code is handled by neither NON_RETRYABLE_CONTINUATION_ERROR_CODES nor the
+          // didAutomaticRecoveryFail path above (e.g.
+          // `ironclaw_gateway_no_tool_calls_on_write` — a doer that keeps returning
+          // text with zero tool calls because the write target is already satisfied)
+          // previously fell straight through to re-dispatch with no cap, producing the
+          // 41×600s retry loop of 2026-08-08. Apply the same consecutive-identical-error
+          // cap here so it converges instead of looping forever.
+          const { consecutive } = await summarizeRecentContinuationRetries(
+            issue.companyId,
+            issue.id,
+            agentId,
+            classification.errorCode,
+          );
+          if (consecutive >= CONTINUATION_RECOVERY_UNCLASSIFIED_MAX_ATTEMPTS) {
+            const failureSummary = summarizeRunFailureForIssueComment(latestRun);
+            const attemptCopy = consecutive <= 1 ? "" : ` (${consecutive}× attempts)`;
+            const causeCopy = classification.errorCode
+              ? ` Latest cause: \`${classification.errorCode}\`.`
+              : "";
+            const updated = await escalateStrandedAssignedIssue({
+              issue,
+              previousStatus: "in_progress",
+              latestRun,
+              comment:
+                "Paperclip re-dispatched this assigned `in_progress` issue but it keeps failing with " +
+                `the same non-transient error and retrying is not converging${attemptCopy}.${causeCopy}` +
+                `${failureSummary ?? ""} Stopping automatic retries and moving it to \`blocked\` so it is ` +
+                "visible for intervention.",
+            });
+            if (updated) {
+              result.escalated += 1;
+              result.issueIds.push(issue.id);
+            } else {
+              result.skipped += 1;
+            }
+            continue;
           }
         }
       }

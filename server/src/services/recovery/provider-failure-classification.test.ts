@@ -2,7 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS,
   classifyAdapterFailureForRecovery,
+  classifyContinuationFailure,
 } from "./service.js";
+
+type ContinuationRun = Parameters<typeof classifyContinuationFailure>[0];
+const runWithCode = (errorCode: string): ContinuationRun =>
+  ({ errorCode, error: null, resultJson: null }) as unknown as ContinuationRun;
 
 describe("classifyAdapterFailureForRecovery", () => {
   it("classifies usage-limit messages and parses the provider reset time", () => {
@@ -91,5 +96,23 @@ describe("classifyAdapterFailureForRecovery", () => {
       error: "Workspace storage capacity limit reached.",
       resultJson: null,
     })).toBeNull();
+  });
+});
+
+describe("classifyContinuationFailure — routing to the PRI-193 convergence backstop", () => {
+  it("classifies ironclaw_gateway_no_tool_calls_on_write as `default`", () => {
+    // A `default` classification is exactly what falls into the new consecutive-
+    // identical-error convergence backstop (the didAutomaticRecoveryFail `else`
+    // branch). Before PRI-193 this code matched neither the non-retryable set nor
+    // the automatic-recovery path, so it re-dispatched with no cap → the 41×600s
+    // loop of 2026-08-08.
+    expect(classifyContinuationFailure(runWithCode("ironclaw_gateway_no_tool_calls_on_write")).kind).toBe("default");
+    // The new event-silence timeout code is in the same unclassified/default class.
+    expect(classifyContinuationFailure(runWithCode("ironclaw_gateway_event_silence")).kind).toBe("default");
+  });
+
+  it("leaves transient-infra and non-retryable codes classified as before", () => {
+    expect(classifyContinuationFailure(runWithCode("adapter_failed")).kind).toBe("transient_infra");
+    expect(classifyContinuationFailure(runWithCode("agent_not_found")).kind).toBe("non_retryable");
   });
 });
