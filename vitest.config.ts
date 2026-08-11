@@ -14,6 +14,7 @@ export default defineConfig({
       "packages/adapters/gemini-local",
       "packages/adapters/grok-local",
       "packages/adapters/ironclaw-gateway",
+      "packages/adapters/openclaw-gateway",
       "packages/adapters/opencode-local",
       "packages/adapters/pi-local",
       "packages/plugins/sdk",
